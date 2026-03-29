@@ -1,0 +1,84 @@
+[project]
+name = "fused-turboquant"
+version = "0.1.0"
+description = "Fused Triton encode/decode kernels for TurboQuant KV cache compression, powered by Randomized Hadamard Transform."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "fused-turboquant Contributors" },
+]
+keywords = [
+    "turboquant",
+    "kv-cache",
+    "quantization",
+    "hadamard",
+    "vllm",
+    "triton",
+    "llm",
+    "inference",
+    "compression",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.4",
+    "scipy>=1.10",
+    "numpy>=1.24",
+    "triton>=3.0; sys_platform == 'linux'",
+    "triton-windows>=3.5; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm>=0.8; sys_platform == 'linux'"]
+hf = ["transformers>=4.45", "accelerate>=0.25", "datasets>=2.14"]
+dev = [
+    "pytest>=8.0",
+    "pytest-benchmark>=4.0",
+    "ruff>=0.4",
+]
+bench = ["datasets>=2.14"]
+all = ["fused-turboquant[hf,dev,bench]"]
+
+[project.urls]
+Homepage = "https://github.com/user/fused-turboquant"
+Repository = "https://github.com/user/fused-turboquant"
+Issues = "https://github.com/user/fused-turboquant/issues"
+
+[project.entry-points."vllm.general_plugins"]
+fused_turboquant = "fused_turboquant.vllm_plugin:register_backend"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fused_turboquant"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
