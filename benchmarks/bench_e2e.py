@@ -264,32 +264,41 @@ def run_throughput(model, tokenizer, methods, max_new_tokens: int) -> dict[str, 
         label = m["label"]
         print(f"\n  --- {label} ---")
 
-        cache_obj = None
-        if m["setup"] is not None:
-            cache_obj = m["setup"]()
+        try:
+            cache_obj = None
+            if m["setup"] is not None:
+                cache_obj = m["setup"]()
 
-        all_tps, all_mem, all_wall = [], [], []
-        for i, prompt in enumerate(PROMPTS):
-            if m["factory"] == "fused":
-                factory = lambda c=cache_obj: c  # noqa: E731
-            else:
-                factory = m["factory"]
+            all_tps, all_mem, all_wall = [], [], []
+            for i, prompt in enumerate(PROMPTS):
+                if m["factory"] == "fused":
+                    factory = lambda c=cache_obj: c  # noqa: E731
+                else:
+                    factory = m["factory"]
 
-            r = measure_generation(model, tokenizer, prompt, max_new_tokens, factory)
-            all_tps.append(r["tokens_per_sec"])
-            all_mem.append(r["peak_memory_mb"])
-            all_wall.append(r["wall_time_s"])
-            print(f"    Prompt {i + 1}: {r['tokens_per_sec']:.1f} tok/s, "
-                  f"{r['peak_memory_mb']:.0f} MB peak, {r['wall_time_s']:.2f}s")
+                r = measure_generation(model, tokenizer, prompt, max_new_tokens, factory)
+                all_tps.append(r["tokens_per_sec"])
+                all_mem.append(r["peak_memory_mb"])
+                all_wall.append(r["wall_time_s"])
+                print(f"    Prompt {i + 1}: {r['tokens_per_sec']:.1f} tok/s, "
+                      f"{r['peak_memory_mb']:.0f} MB peak, {r['wall_time_s']:.2f}s")
 
-        if m["teardown"] is not None:
-            m["teardown"]()
+            if m["teardown"] is not None:
+                m["teardown"]()
 
-        results[label] = {
-            "avg_tps": sum(all_tps) / len(all_tps),
-            "max_peak_memory_mb": max(all_mem),
-            "avg_wall_time_s": sum(all_wall) / len(all_wall),
-        }
+            results[label] = {
+                "avg_tps": sum(all_tps) / len(all_tps),
+                "max_peak_memory_mb": max(all_mem),
+                "avg_wall_time_s": sum(all_wall) / len(all_wall),
+            }
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            print(f"    Skipping {label}")
+            if m["teardown"] is not None:
+                try:
+                    m["teardown"]()
+                except Exception:
+                    pass
 
     return results
 
@@ -303,26 +312,39 @@ def run_quality(model, tokenizer, methods, max_length: int, stride: int) -> dict
         print(f"\n  --- {label} ---")
         _reset_gpu()
 
-        if m["factory"] == "fused":
-            cache_obj = m["setup"]()
-            factory = lambda c=cache_obj: c  # noqa: E731
-        elif m["factory"] is not None:
-            factory = m["factory"]
-        else:
-            factory = None
+        try:
+            if m["factory"] == "fused":
+                cache_obj = m["setup"]()
+                factory = lambda c=cache_obj: c  # noqa: E731
+            elif m["factory"] is not None:
+                factory = m["factory"]
+            else:
+                factory = None
 
-        t0 = time.time()
-        r = compute_perplexity(model, input_ids, windows, factory, stride)
-        elapsed = time.time() - t0
-        peak = torch.cuda.max_memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            t0 = time.time()
+            r = compute_perplexity(model, input_ids, windows, factory, stride)
+            elapsed = time.time() - t0
+            peak = (
+                torch.cuda.max_memory_allocated() / 1024**2
+                if torch.cuda.is_available() else 0
+            )
 
-        if m["factory"] == "fused" and m["teardown"] is not None:
-            m["teardown"]()
+            if m["factory"] == "fused" and m["teardown"] is not None:
+                m["teardown"]()
 
-        r["time_s"] = elapsed
-        r["peak_memory_mb"] = peak
-        results[label] = r
-        print(f"    Perplexity: {r['perplexity']:.2f} ({elapsed:.1f}s, {peak:.0f} MB peak)")
+            r["time_s"] = elapsed
+            r["peak_memory_mb"] = peak
+            results[label] = r
+            print(f"    Perplexity: {r['perplexity']:.2f} "
+                  f"({elapsed:.1f}s, {peak:.0f} MB peak)")
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            print(f"    Skipping {label}")
+            if m["factory"] == "fused" and m["teardown"] is not None:
+                try:
+                    m["teardown"]()
+                except Exception:
+                    pass
 
     return results
 
