@@ -68,13 +68,46 @@ Full sweep across batch sizes, head_dims, and bit-widths: `uv run python benchma
 | 3 | 5.3x | 0.971 | 0.017 | Acceptable |
 | 2 | 8.0x | 0.901 | 0.057 | Draft only |
 
-## Quick Start
+## Installation
+
+**pip** (recommended for most users):
 
 ```bash
-git clone https://github.com/user/fused-turboquant.git
-cd fused-turboquant
-uv sync --extra dev
+pip install fused-turboquant[cuda]
 ```
+
+This installs the core library plus Triton for fused GPU kernels. If you already have PyTorch with CUDA, the base install only adds scipy and numpy:
+
+```bash
+pip install fused-turboquant
+```
+
+> **Note**: PyTorch defaults to CPU-only on some platforms. If `torch.cuda.is_available()` returns `False`, install CUDA-enabled PyTorch first:
+> ```bash
+> pip install torch --index-url https://download.pytorch.org/whl/cu128
+> ```
+
+**With HuggingFace integration**:
+
+```bash
+pip install fused-turboquant[cuda,hf]
+```
+
+**With vLLM plugin**:
+
+```bash
+pip install fused-turboquant[vllm]
+```
+
+**From source** (development):
+
+```bash
+git clone https://github.com/Argonaut790/fused-turboquant.git
+cd fused-turboquant
+pip install -e ".[dev]"       # or: uv sync --extra dev
+```
+
+## Quick Start
 
 ```python
 import torch
@@ -94,24 +127,105 @@ decoded = tq.decode(compressed)
 print(f"Compression: {compressed.compression_ratio:.1f}x")  # 3.9x
 ```
 
+The package auto-detects CUDA + Triton and uses fused kernels when available, falling back to an unfused PyTorch implementation on CPU.
+
+## Usage
+
+### Standalone Encode/Decode
+
+Compress arbitrary tensors with shape `(..., head_dim)` where `head_dim` is a power of 2:
+
+```python
+import torch
+from fused_turboquant import TurboQuantMSE
+
+tq = TurboQuantMSE(head_dim=128, bits=4, device="cuda")
+
+x = torch.randn(32, 8, 128, device="cuda")  # (batch, heads, head_dim)
+compressed = tq.encode(x)
+decoded = tq.decode(compressed)
+
+cos_sim = torch.nn.functional.cosine_similarity(
+    x.flatten(0, -2), decoded.flatten(0, -2), dim=-1,
+).mean()
+print(f"Cosine similarity: {cos_sim:.4f}")       # ~0.99 at 4-bit
+print(f"Compression: {compressed.compression_ratio:.1f}x")  # ~3.9x
+```
+
+### HuggingFace Integration
+
+Two strategies are provided. Both require `pip install fused-turboquant[cuda,hf]`.
+
+**Simulation cache** -- measures quality impact without changing inference memory:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from fused_turboquant.hf import make_simulation_cache
+
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+
+cache = make_simulation_cache(bits=4)
+inputs = tokenizer("The capital of France is", return_tensors="pt").to(model.device)
+out = model.generate(**inputs, past_key_values=cache, max_new_tokens=50, use_cache=True)
+print(tokenizer.decode(out[0], skip_special_tokens=True))
+```
+
+**Fused cache** -- real compressed storage with fused attention:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from fused_turboquant.hf import patch_model
+
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+
+cache = patch_model(model, bits=4)
+inputs = tokenizer("Hello", return_tensors="pt").to(model.device)
+out = model.generate(**inputs, past_key_values=cache, max_new_tokens=50, use_cache=True)
+print(tokenizer.decode(out[0], skip_special_tokens=True))
+```
+
+## Supported Versions
+
+| Dependency | Minimum | Tested up to | Notes |
+|:----------:|:-------:|:------------:|-------|
+| Python | 3.10 | 3.12 | |
+| PyTorch | 2.4 | 2.11 | CUDA wheels recommended |
+| Triton | 3.0 | 3.6 | Optional (fused kernels); `pip install fused-turboquant[cuda]` |
+| transformers | 4.45 | latest | For HF integration; `pip install fused-turboquant[hf]` |
+| vLLM | 0.8 | 0.18 | Linux only; `pip install fused-turboquant[vllm]` |
+
+### Running Tests & Benchmarks
+
 ```bash
-uv run pytest                                       # unit tests
-uv run python benchmarks/run_fused_benchmark.py     # kernel microbenchmarks
-uv run python benchmarks/run_full_comparison.py     # quality + memory benchmarks
+pytest                                               # unit tests
+python benchmarks/run_fused_benchmark.py             # kernel microbenchmarks
+python benchmarks/run_full_comparison.py             # quality + memory benchmarks
 ```
 
 ### Real Model Benchmarks (Linux + GPU)
 
+The primary benchmark compares all implementations (FP16, ours fused, ours simulation, Dejan.ai) in a single run:
+
 ```bash
 uv sync --extra hf --extra dev
 
-# Quick test on small model
-uv run python benchmarks/bench_quality.py --model Qwen/Qwen2.5-0.5B --bits 4
-uv run python benchmarks/bench_throughput.py --model Qwen/Qwen2.5-0.5B
+# Quick 4-way comparison: throughput + memory
+uv run python benchmarks/bench_e2e.py --model Qwen/Qwen2.5-0.5B --bits 4
 
-# Full benchmark on Qwen3.5-9B
-uv run python benchmarks/bench_quality.py --model Qwen/Qwen3.5-9B --bits 4 --bits 2
-uv run python benchmarks/bench_throughput.py --model Qwen/Qwen3.5-9B --bits 4
+# Full comparison including WikiText-2 perplexity
+uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3.5-9B --bits 4 --quality
+
+# Export results to JSON
+uv run python benchmarks/bench_e2e.py --model Qwen/Qwen2.5-0.5B --bits 4 --json results.json
+```
+
+Individual benchmarks are also available:
+
+```bash
+uv run python benchmarks/bench_quality.py --model Qwen/Qwen2.5-0.5B --bits 4
+uv run python benchmarks/bench_throughput.py --model Qwen/Qwen2.5-0.5B --bits 4
 uv run python benchmarks/bench_vllm_baseline.py --model Qwen/Qwen3.5-9B
 ```
 

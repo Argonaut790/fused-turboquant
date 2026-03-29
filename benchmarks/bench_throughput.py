@@ -5,10 +5,12 @@ Compares:
   1. FP16 baseline (no compression, standard HF generate)
   2. SimulationCache (roundtrip compression, measures overhead)
   3. FusedTurboQuant cache (compressed keys + fused attention)
+  4. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
 
 Usage:
     uv run python benchmarks/bench_throughput.py --model Qwen/Qwen2.5-0.5B
     uv run python benchmarks/bench_throughput.py --model Qwen/Qwen3.5-9B --bits 4
+    uv run python benchmarks/bench_throughput.py --model Qwen/Qwen2.5-0.5B --no-dejan
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+DEJAN_DIR = Path(__file__).resolve().parent / "dejan_baseline"
 
 
 def load_model_and_tokenizer(model_name: str, dtype: torch.dtype = torch.float16):
@@ -125,18 +129,41 @@ def measure_generation(
     }
 
 
-def run_benchmark(model, tokenizer, max_new_tokens: int, bits: int):
+def _try_import_dejan():
+    """Try to import Dejan.ai baseline. Returns make_quantized_cache or None."""
+    try:
+        sys.path.insert(0, str(DEJAN_DIR))
+        from turboquant_kv_cache import make_quantized_cache
+
+        return make_quantized_cache
+    except ImportError:
+        return None
+
+
+def run_benchmark(
+    model, tokenizer, max_new_tokens: int, bits: int, include_dejan: bool = True,
+):
     """Run full throughput comparison."""
-    from fused_turboquant.hf.simulation_cache import make_simulation_cache
     from fused_turboquant.hf.fused_cache import patch_model, unpatch_model
+    from fused_turboquant.hf.simulation_cache import make_simulation_cache
 
     methods = {
         "FP16 baseline": None,
         f"SimulationCache TQ{bits}": lambda b=bits: make_simulation_cache(bits=b),
     }
 
+    if include_dejan:
+        make_quantized_cache = _try_import_dejan()
+        if make_quantized_cache is not None:
+            methods[f"Dejan.ai TQ{bits}"] = (
+                lambda b=bits, f=make_quantized_cache: f(bits=b)
+            )
+        else:
+            print("  WARNING: Could not import Dejan baseline — skipping.")
+            print(f"           Expected at: {DEJAN_DIR}/turboquant_kv_cache.py")
+
     all_results = {k: [] for k in methods}
-    all_results["FusedTurboQuant TQ" + str(bits)] = []
+    all_results[f"FusedTurboQuant TQ{bits}"] = []
 
     for prompt_idx, prompt in enumerate(PROMPTS):
         print(f"\n  Prompt {prompt_idx + 1}/{len(PROMPTS)}: \"{prompt[:60]}...\"")
@@ -196,6 +223,8 @@ def main():
                         help="Quantization bit-width")
     parser.add_argument("--max-new-tokens", type=int, default=200,
                         help="Max tokens to generate per prompt")
+    parser.add_argument("--no-dejan", action="store_true",
+                        help="Skip Dejan.ai comparison")
     parser.add_argument("--dtype", type=str, default="float16",
                         choices=["float16", "bfloat16"],
                         help="Model dtype")
@@ -208,7 +237,10 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     print(f"\nBenchmarking with {args.bits}-bit TurboQuant, max_new_tokens={args.max_new_tokens}")
-    all_results = run_benchmark(model, tokenizer, args.max_new_tokens, args.bits)
+    all_results = run_benchmark(
+        model, tokenizer, args.max_new_tokens, args.bits,
+        include_dejan=not args.no_dejan,
+    )
     print_summary(all_results, args.max_new_tokens, args.model)
 
 
