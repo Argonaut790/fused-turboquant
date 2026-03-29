@@ -3,9 +3,9 @@
 import pytest
 import torch
 
-from fused_turboquant.core.quantizer import TurboQuantMSE
 from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
-from fused_turboquant.core.packing import pack_nibbles, unpack_nibbles, pack_2bit, unpack_2bit
+from fused_turboquant.core.packing import pack_2bit, pack_nibbles, unpack_2bit, unpack_nibbles
+from fused_turboquant.core.quantizer import TurboQuantMSE
 
 
 class TestLloydMax:

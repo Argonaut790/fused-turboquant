@@ -21,11 +21,9 @@ import torch
 
 from fused_turboquant.core.hadamard import (
     RHTRotation,
-    inverse_randomized_hadamard,
-    randomized_hadamard,
 )
 from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
-from fused_turboquant.core.packing import pack_nibbles, unpack_nibbles, pack_2bit, unpack_2bit
+from fused_turboquant.core.packing import pack_2bit, pack_nibbles, unpack_2bit, unpack_nibbles
 
 
 @dataclass
@@ -40,7 +38,7 @@ class CompressedTensor:
     @property
     def compression_ratio(self) -> float:
         original_bytes = self.norms.numel() * self.original_dim * 2  # fp16
-        compressed_bytes = self.indices.numel() + self.norms.numel() * 4  # uint8 packed + fp32 norms
+        compressed_bytes = self.indices.numel() + self.norms.numel() * 4
         if compressed_bytes == 0:
             return float("inf")
         return original_bytes / compressed_bytes

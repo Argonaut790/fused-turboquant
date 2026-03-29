@@ -11,8 +11,8 @@ from fused_turboquant.core.hadamard import (
     fwht,
     generate_rht_signs,
     inverse_fwht,
-    randomized_hadamard,
     inverse_randomized_hadamard,
+    randomized_hadamard,
 )
 
 

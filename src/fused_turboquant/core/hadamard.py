@@ -11,8 +11,6 @@ each launch one large efficient GPU kernel rather than thousands of tiny ones.
 
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 
