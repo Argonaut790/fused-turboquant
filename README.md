@@ -242,7 +242,15 @@ Both K and V caches are compressed by default (`compress_v=True`). All bit-width
 | **FusedTQ4** (K+V) | 4 | 4.25 | **~3.8x** | K: 68B + V: 68B = 136B |
 | **FusedTQ3** (K+V) | 3 | 3.25 | **~4.9x** | K: 52B + V: 52B = 104B |
 
-> **KV cache compression vs total memory**: The ~3.8x / ~4.9x ratios above are for the **KV cache data only** (512B → 136B or 104B per position). Total GPU memory also includes model weights (~16 GB for Qwen3-8B) which are unchanged by KV compression. At short contexts (4K), the KV cache is small relative to model weights so total memory savings are modest (~2-3%). At long contexts (32K+), the KV cache dominates and savings approach the theoretical ratios. This is why KV cache compression becomes critical at scale — see the measured tables below.
+> **KV cache compression vs total memory**: The ~3.8x / ~4.9x ratios above are for the **KV cache data only** (512B → 136B or 104B per position). Total GPU memory also includes model weights (~16 GB for Qwen3-8B) which are unchanged by KV compression. At short contexts the KV cache is small relative to model weights, so end-to-end savings appear modest; at long contexts the KV cache dominates and savings approach the theoretical ratios:
+>
+> | Context | KV Cache Share of Total | End-to-End Memory Saved (FusedTQ4) |
+> |--------:|:-----------------------:|:----------------------------------:|
+> | 4K | ~3% | ~418 MB (2.5%) |
+> | 32K | ~30% | ~3,348 MB (14%) |
+> | 128K+ | >50% | Approaches ~3.8x |
+>
+> This is why KV cache compression becomes critical at scale — at 1M tokens the KV cache alone would be ~128 GB in FP16 but only ~34 GB with FusedTQ4.
 >
 > **Effective bit-rate**: The nominal `--bits` is the index width; the per-vector fp32 norm adds overhead. For head_dim=128: `bits=3` → 3.25 bits/elem, `bits=4` → 4.25 bits/elem.
 >
