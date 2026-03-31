@@ -16,7 +16,7 @@ from typing import Optional
 
 import torch
 
-from fused_turboquant.core.quantizer import TurboQuantMSE, CompressedTensor
+from fused_turboquant.core.quantizer import CompressedTensor, TurboQuantMSE
 
 
 class TurboQuantKVCache:
@@ -135,7 +135,6 @@ class TurboQuantKVCache:
             return 0
         total = 0
         for ct in self._key_cache[0]:
-            dim = ct.original_dim
             if ct.bits == 4:
                 total += ct.indices.shape[-1] * 2
             elif ct.bits == 2:
