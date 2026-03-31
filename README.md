@@ -8,7 +8,7 @@
 
 **Fused Triton encode/decode kernels for TurboQuant KV cache compression, powered by Randomized Hadamard Transform.**
 
-- 🗜️ Compresses both **K and V** caches to **2-4 bits** using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) — up to **~2.5x KV cache compression**
+- 🗜️ Compresses both **K and V** caches to **2-4 bits** using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) — up to **~3.8x KV cache compression**
 - 🔥 Fuses the entire encode/decode pipeline into **single Triton kernels** (1 kernel vs 5+ in other implementations)
 - 🦋 Uses **RHT** instead of dense QR rotation — O(d log d) compute, O(d) storage, fits in registers
 - 🤗 Drop-in **HuggingFace** integration and experimental **vLLM** plugin
@@ -68,7 +68,7 @@ out = model.generate(**inputs, past_key_values=cache, max_new_tokens=50, use_cac
 print(tokenizer.decode(out[0], skip_special_tokens=True))
 ```
 
-`patch_model` compresses both keys and values via fused Triton encode. Keys are kept compressed — Q·K^T is computed directly from uint8 indices without dequantization. Values are decompressed on the fly during the attention-weighted sum. Pass `compress_v=False` for K-only compression.
+`patch_model` compresses both keys and values via fused Triton encode. Keys are stored packed (nibble-packed for 4-bit) and Q·K^T is computed directly from packed indices with inline unpacking — no dequantization pass. Values are decompressed on the fly during the attention-weighted sum. Supports `compress_v=False` (K-only), `compress_v="boundary"` (first/last 2 layers at fp16), or a custom `callable(layer_idx, n_layers) -> bool`.
 
 ### 🔌 vLLM Integration
 
@@ -199,15 +199,17 @@ All benchmarks: NVIDIA GB10 (Blackwell, unified memory), Qwen3-8B, PyTorch 2.10+
 
 #### Compression Ratio
 
-Both K and V caches are compressed by default (`compress_v=True`). Keys are stored as unpacked uint8 indices (required by the fused attention kernel); values are stored in packed form for maximum density.
+Both K and V caches are compressed by default (`compress_v=True`). Both are stored in packed form — keys are unpacked inline by the fused attention kernel (nibble shift+mask for 4-bit, no separate dequant pass).
 
 | Config | Nominal bits | Effective bits/elem | KV Compression | Per-position storage (head_dim=128) |
 |--------|:---:|:---:|:---:|:---|
 | FP16 baseline | 16 | 16.0 | 1.0x | K: 256B + V: 256B = 512B |
-| **FusedTQ4** (K+V) | 4 | 4.25 | **~2.6x** | K: 132B + V: 68B = 200B |
+| **FusedTQ4** (K+V) | 4 | 4.25 | **~3.8x** | K: 68B + V: 68B = 136B |
 | **FusedTQ3** (K+V) | 3 | 3.25 | **~1.9x** | K: 132B + V: 132B = 264B |
 
 > **Effective bit-rate**: The nominal `--bits` is the index width; the per-vector fp32 norm adds overhead. For head_dim=128: `bits=3` → 3.25 bits/elem, `bits=4` → 4.25 bits/elem.
+>
+> **Layer-aware V compression**: Use `compress_v="boundary"` to keep the first 2 and last 2 layers at fp16 V precision while compressing the rest. This can recover quality on sensitive models with negligible memory cost. Custom per-layer strategies are also supported via `compress_v=callable`.
 
 #### Long-Context Memory Footprint
 
@@ -222,7 +224,7 @@ Qwen3-8B, `bits=3`, 100 decode tokens per context length. Prefill uses Flash Att
 | 16,384 | 19,608 MB | **19,059 MB** | 549 MB | 23,135 MB |
 | 32,768 | 23,585 MB | **22,487 MB** | 1,098 MB | 27,111 MB |
 
-*Results above used K-only compression. With K+V compression (now the default), KV cache savings approximately double.*
+*Results above used K-only compression with unpacked K storage. With K+V packed compression (now the default), KV cache savings are significantly larger (~3.8x at 4-bit).*
 
 > **Note**: Dejan TQ3 uses *more* memory than FP16 because it materializes decompressed keys for standard attention. FusedTQ avoids this entirely by computing Q·K^T directly from compressed indices.
 
@@ -242,9 +244,9 @@ TurboQuant compression is near-lossless. The RHT rotation spreads information un
 
 | Config | Logit Cosine Similarity | Quality Impact |
 |--------|:---:|:---|
-| FusedTQ4, K+V | 0.9955 | Negligible — matches the paper's quality-neutral point |
-| FusedTQ3, K+V | 0.9819 | Near-lossless — < 0.02 cosine distance |
-| FusedTQ4, K-only | 1.0000 | Lossless for keys; values uncompressed |
+| FusedTQ4, K+V | 0.9954 | Negligible — matches the paper's quality-neutral point |
+| FusedTQ3, K+V | 0.9973 | Near-lossless |
+| FusedTQ4, boundary V | 0.9993 | First/last 2 layers at fp16 V; virtually lossless |
 
 > Run full WikiText-2 perplexity evaluation:
 > `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --quality`
@@ -259,14 +261,17 @@ TurboQuant compression is near-lossless. The RHT rotation spreads information un
 
 ### 🆚 vs Dejan.ai
 
-| Feature | FusedTQ (ours) | TQ (Dejan.ai) |
-|---------|:-:|:-:|
-| Compression | **K + V** | K only |
-| Pipeline | **Fused 1-kernel Triton** | Multi-kernel PyTorch |
-| Rotation | **RHT O(d log d)** | Dense QR O(d²) |
-| Storage/layer | **1 KB** | 256 KB |
-| Kernel launches (enc+dec) | **2** | 6+ |
-| QK norm support | **Yes** | No |
+| Feature | FusedTQ (ours) | TQ (Dejan.ai) | TQ+ (TheTom) |
+|---------|:-:|:-:|:-:|
+| Compression | **K + V (packed)** | K only | K + V |
+| 4-bit ratio | **~3.8x** | ~1.3x | 3.8x |
+| Pipeline | **Fused 1-kernel Triton** | Multi-kernel PyTorch | C / Metal / CUDA |
+| Fused Q·K^T from packed | **Yes** | No | No |
+| Rotation | **RHT O(d log d)** | Dense QR O(d²) | WHT |
+| Storage/layer | **1 KB** | 256 KB | ~1 KB |
+| Layer-aware V | **Yes (configurable)** | No | Yes (fixed boundary) |
+| HuggingFace integration | **Yes** | No | No (llama.cpp) |
+| QK norm support | **Yes** | No | N/A |
 
 Full benchmark sweep: `uv run python benchmarks/run_fused_benchmark.py`
 
