@@ -104,12 +104,10 @@ def _probe_attention_module(module, config) -> dict:
 class CompressedKVCache(DynamicCache):
     """KV cache that stores compressed keys and values.
 
-    Keys are stored as unpacked uint8 indices + fp32 norms so the fused
-    Triton attention kernel can read them directly (no dequantization).
-
-    Values are stored in packed form (nibble-packed for 4-bit, 2-bit packed
-    for 2-bit) since they are decompressed in bulk before the matmul.
-    Packed storage saves ~2x memory vs unpacked for 4-bit.
+    Both keys and values are stored in packed form (nibble-packed for 4-bit,
+    bitstream-packed for 3-bit, 2-bit packed for 2-bit). The fused Triton
+    attention kernel unpacks key indices inline via shift+mask (no separate
+    dequantization pass). Values are decompressed in bulk before the matmul.
 
     A minimal dummy tensor is passed to DynamicCache.update() so that
     transformers' internal bookkeeping (get_seq_length, etc.) stays correct.

@@ -6,12 +6,12 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b)](https://arxiv.org/abs/2504.19874)
 [![GitHub stars](https://img.shields.io/github/stars/Argonaut790/fused-turboquant?style=social)](https://github.com/Argonaut790/fused-turboquant)
 
-**Fused Triton encode/decode kernels for TurboQuant KV cache compression, powered by Randomized Hadamard Transform.**
+**fused-turboquant** is a high-performance Python library for compressing LLM KV caches to 2-4 bits using the TurboQuant algorithm (Google Research, ICLR 2026). It fuses the entire quantization pipeline — Randomized Hadamard Transform, normalization, Lloyd-Max quantization, and bit packing — into single Triton GPU kernels, achieving up to 4.9x memory compression with near-lossless quality. Drop-in support for HuggingFace Transformers and vLLM. Works with Llama, Qwen, Mistral, Phi, and more.
 
-- 🗜️ Compresses both **K and V** caches to **2-4 bits** using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) — up to **~3.8x KV cache compression**
+- 🗜️ Compresses both **K and V** caches to **2-4 bits** using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) — up to **~4.9x KV cache compression** (3-bit) or **~3.8x** (4-bit)
 - 🔥 Fuses the entire encode/decode pipeline into **single Triton kernels** (1 kernel vs 5+ in other implementations)
 - 🦋 Uses **RHT** instead of dense QR rotation — O(d log d) compute, O(d) storage, fits in registers
-- 🤗 Drop-in **HuggingFace** integration and experimental **vLLM** plugin
+- 🤗 Drop-in **HuggingFace** integration and **vLLM** attention backend
 - 🔄 Auto-detects CUDA + Triton; falls back to unfused PyTorch on CPU
 
 ## 📦 Installation
@@ -72,13 +72,46 @@ print(tokenizer.decode(out[0], skip_special_tokens=True))
 
 ### 🔌 vLLM Integration
 
-> 🚧 **Status**: Registers a `TURBOQUANT_RHT` backend via entry point. Full PagedAttention integration is WIP.
+Serve any supported model with compressed KV cache through vLLM's standard serving stack — continuous batching, OpenAI-compatible API, and paged block management all work transparently with compressed blocks.
 
 ```bash
 pip install fused-turboquant[vllm]
 ```
 
-The plugin auto-registers via Python entry points — no code changes needed to vLLM.
+**Online serving** (OpenAI-compatible API):
+
+```bash
+vllm serve Qwen/Qwen3-8B --attention-backend FUSED_TURBOQUANT
+```
+
+**Offline batch inference** (Python API):
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM("Qwen/Qwen3-8B", attention_backend="FUSED_TURBOQUANT")
+outputs = llm.generate(
+    ["Explain KV cache compression in one paragraph."],
+    SamplingParams(max_tokens=200, temperature=0.0),
+)
+print(outputs[0].outputs[0].text)
+```
+
+**Configuration** via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `TURBOQUANT_BITS` | `4` | Quantization bit-width (2, 3, or 4) |
+| `TURBOQUANT_COMPRESS_V` | `1` | Compress values too (`1`) or K-only (`0`) |
+
+```bash
+# 3-bit K+V compression for maximum memory savings
+TURBOQUANT_BITS=3 vllm serve Qwen/Qwen3-8B --attention-backend FUSED_TURBOQUANT
+```
+
+The plugin auto-registers via Python entry points — no code changes needed to vLLM. KV cache blocks are stored as packed uint8 indices + fp32 norms within vLLM's paged block system. Prefill uses FlashAttention/SDPA on full-precision KV, then compresses for storage. Decode uses our fused Triton QK kernel directly on packed indices.
+
+**Compatibility**: vLLM 0.8 – 0.18+ | Requires CUDA with Triton
 
 ## ✅ Supported Models
 
@@ -189,6 +222,8 @@ Other implementations:  [rotation] → HBM → [norm] → HBM → [quantize] →
 This project:           [single Triton kernel: RHT → norm → quantize → pack]              1 kernel
 ```
 
+**Prefill vs Decode**: Compression applies to the **decode (generation) phase**. During prefill (processing the prompt), we use Flash Attention (SDPA) on full FP16 keys and values for maximum speed — the KV tensors are then compressed and stored in packed form. During autoregressive decode, each new token's KV is compressed on arrival, and the fused Triton kernel computes Q·K^T directly from packed indices. The memory savings come from the **stored KV cache** being compressed — this is what dominates memory at long contexts.
+
 ## 📊 Benchmarks
 
 All benchmarks: NVIDIA GB10 (Blackwell, unified memory), Qwen3-8B, PyTorch 2.10+cu128.
@@ -199,78 +234,97 @@ All benchmarks: NVIDIA GB10 (Blackwell, unified memory), Qwen3-8B, PyTorch 2.10+
 
 #### Compression Ratio
 
-Both K and V caches are compressed by default (`compress_v=True`). Both are stored in packed form — keys are unpacked inline by the fused attention kernel (nibble shift+mask for 4-bit, no separate dequant pass).
+Both K and V caches are compressed by default (`compress_v=True`). All bit-widths use true packed storage — nibble-packed for 4-bit, bitstream-packed for 3-bit (8 values per 3 bytes), 2-bit packed for 2-bit. Keys are unpacked inline by the fused attention kernel (shift+mask, no separate dequant pass).
 
 | Config | Nominal bits | Effective bits/elem | KV Compression | Per-position storage (head_dim=128) |
 |--------|:---:|:---:|:---:|:---|
 | FP16 baseline | 16 | 16.0 | 1.0x | K: 256B + V: 256B = 512B |
 | **FusedTQ4** (K+V) | 4 | 4.25 | **~3.8x** | K: 68B + V: 68B = 136B |
-| **FusedTQ3** (K+V) | 3 | 3.25 | **~1.9x** | K: 132B + V: 132B = 264B |
+| **FusedTQ3** (K+V) | 3 | 3.25 | **~4.9x** | K: 52B + V: 52B = 104B |
 
 > **Effective bit-rate**: The nominal `--bits` is the index width; the per-vector fp32 norm adds overhead. For head_dim=128: `bits=3` → 3.25 bits/elem, `bits=4` → 4.25 bits/elem.
 >
 > **Layer-aware V compression**: Use `compress_v="boundary"` to keep the first 2 and last 2 layers at fp16 V precision while compressing the rest. This can recover quality on sensitive models with negligible memory cost. Custom per-layer strategies are also supported via `compress_v=callable`.
 
-#### Long-Context Memory Footprint
+#### Measured End-to-End Peak Memory
 
-Peak GPU memory at increasing context lengths. Memory savings grow with context as KV cache becomes a larger fraction of total memory.
+Peak GPU memory (model weights + KV cache + buffers) during generation on NVIDIA GB10. Compression applies to the **decode phase** — prefill uses Flash Attention on full FP16, then KV is compressed for storage.
 
-Qwen3-8B, `bits=3`, 100 decode tokens per context length. Prefill uses Flash Attention (SDPA); only decode uses the fused compressed kernel.
+Qwen3-8B, K+V compressed, 50 decode tokens per context length:
 
-| Context | FP16 Peak | FusedTQ3 (ours) | Saved vs FP16 | TQ3 (Dejan.ai) |
-|--------:|:---------:|:---------------:|:-------------:|:---------------:|
-| 4,096 | 16,626 MB | **16,489 MB** | 137 MB | 20,152 MB |
-| 8,192 | 17,620 MB | **17,346 MB** | 274 MB | 21,147 MB |
-| 16,384 | 19,608 MB | **19,059 MB** | 549 MB | 23,135 MB |
-| 32,768 | 23,585 MB | **22,487 MB** | 1,098 MB | 27,111 MB |
+**3-bit (FusedTQ3):**
 
-*Results above used K-only compression with unpacked K storage. With K+V packed compression (now the default), KV cache savings are significantly larger (~3.8x at 4-bit).*
+| Context | FP16 Peak | FusedTQ3 K+V (ours) | Saved | TQ3 (Dejan.ai) |
+|--------:|:---------:|:-------------------:|:-----:|:---------------:|
+| 4,096 | 16,626 MB | **16,179 MB** | 447 MB | 17,630 MB |
+| 8,192 | 17,620 MB | **16,726 MB** | 894 MB | 18,625 MB |
+| 16,384 | 19,608 MB | **17,790 MB** | 1,818 MB | 20,613 MB |
+| 32,768 | 23,585 MB | **19,949 MB** | 3,636 MB | 24,590 MB |
 
-> **Note**: Dejan TQ3 uses *more* memory than FP16 because it materializes decompressed keys for standard attention. FusedTQ avoids this entirely by computing Q·K^T directly from compressed indices.
+**4-bit (FusedTQ4):**
 
-#### Batch Serving
+| Context | FP16 Peak | FusedTQ4 K+V (ours) | Saved | TQ4 (Dejan.ai) |
+|--------:|:---------:|:-------------------:|:-----:|:---------------:|
+| 4,096 | 16,626 MB | **16,208 MB** | 418 MB | 17,913 MB |
+| 8,192 | 17,620 MB | **16,783 MB** | 837 MB | 18,907 MB |
+| 16,384 | 19,608 MB | **17,934 MB** | 1,674 MB | 20,895 MB |
+| 32,768 | 23,585 MB | **20,237 MB** | 3,348 MB | 24,872 MB |
 
-| Method | Max Batch | Peak Memory | vs FP16 |
-|--------|:---------:|:-----------:|:-------:|
-| FP16 baseline | 64 | 16,727 MB | — |
-| FusedTQ3 (ours) | 64 | **16,492 MB** | -235 MB |
-| TQ3 (Dejan.ai) | 64 | 17,489 MB | +762 MB |
+> **Note**: Dejan TQ uses *more* memory than FP16 because it materializes decompressed keys for standard attention. FusedTQ avoids this entirely by computing Q·K^T directly from packed compressed indices.
 
-With longer sequences (512+ tokens), the memory gap widens, allowing FusedTQ to fit larger batches.
+#### Projected KV Cache at 1M Context
+
+Based on the measured per-token compression ratios, the KV cache (excluding model weights) at extreme context lengths for Qwen3-8B (32 layers, 8 KV heads, head_dim=128):
+
+| Context | FP16 KV Cache | FusedTQ4 K+V (~3.8x) | FusedTQ3 K+V (~4.9x) |
+|--------:|:-------------:|:---------------------:|:---------------------:|
+| 131,072 (128K) | 16 GB | 4.2 GB | **3.2 GB** |
+| 524,288 (512K) | 64 GB | 17 GB | **13 GB** |
+| **1,048,576 (1M)** | **128 GB** | **34 GB** | **26 GB** |
+
+> *Calculated from measured per-token storage: FP16=128 KB/token, FusedTQ4=34 KB/token, FusedTQ3=26 KB/token.* At 1M context, FP16 KV cache alone exceeds most GPU VRAM (128 GB). FusedTQ3 reduces this to **26 GB** — fitting on a single 80 GB GPU (A100/H100).
 
 ### Quality
 
-TurboQuant compression is near-lossless. The RHT rotation spreads information uniformly across coordinates before quantization, preserving vector geometry.
+Measured on Qwen3-8B via teacher-forced decode: 20 tokens prefilled, then ground-truth tokens fed one at a time through the compressed KV attention path. Logit cosine similarity compared against FP16 reference at each decode position.
 
-| Config | Logit Cosine Similarity | Quality Impact |
-|--------|:---:|:---|
-| FusedTQ4, K+V | 0.9954 | Negligible — matches the paper's quality-neutral point |
-| FusedTQ3, K+V | 0.9973 | Near-lossless |
-| FusedTQ4, boundary V | 0.9993 | First/last 2 layers at fp16 V; virtually lossless |
+| Config | Avg Logit Cosine Sim | Min Logit Cosine Sim | Quality Impact |
+|--------|:---:|:---:|:---|
+| FusedTQ4, K+V | **0.9869** | 0.9048 | Near-lossless at the paper's quality-neutral point |
+| FusedTQ3, K+V | **0.9538** | 0.5087 | Good average quality, occasional outlier positions |
+| FusedTQ4, boundary V | **0.9825** | 0.8284 | First/last 2 layers at fp16 V |
 
 > Run full WikiText-2 perplexity evaluation:
-> `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --quality`
+> `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 4 --quality`
 
 ### Throughput
 
-> Compression overhead is minimal: all FusedTQ configurations run **within 5–7% of FP16 throughput** across standard, long-context, and batch workloads. KV cache compression is a memory optimization — the goal is fitting more context and larger batches, not faster single-sequence generation.
->
-> Reproduce all benchmarks:
-> `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --long-context`
-> `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --batch-search`
+Measured decode throughput (tok/s) on Qwen3-8B, NVIDIA GB10:
 
-### 🆚 vs Dejan.ai
+| Context | FP16 | FusedTQ3 | FusedTQ4 |
+|--------:|:----:|:--------:|:--------:|
+| 4,096 | 3.9 | 3.7 | 2.8 |
+| 8,192 | 2.5 | 2.3 | 1.7 |
+| 16,384 | 1.4 | 1.3 | 0.9 |
+| 32,768 | 0.7 | 0.6 | 0.6 |
+
+> KV cache compression is primarily a **memory optimization** — the goal is fitting more context and larger batches, not faster single-sequence generation. FusedTQ3 runs within 5-15% of FP16 throughput. FusedTQ4 has higher overhead due to nibble packing/unpacking in the attention kernel.
+>
+> Reproduce: `uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --long-context`
+
+### 🆚 vs TQ (Dejan.ai) / TQ+ (TheTom)
 
 | Feature | FusedTQ (ours) | TQ (Dejan.ai) | TQ+ (TheTom) |
 |---------|:-:|:-:|:-:|
-| Compression | **K + V (packed)** | K only | K + V |
-| 4-bit ratio | **~3.8x** | ~1.3x | 3.8x |
-| Pipeline | **Fused 1-kernel Triton** | Multi-kernel PyTorch | C / Metal / CUDA |
+| Compression target | **K + V (packed)** | K only | K + V |
+| 4-bit compression ratio | **~3.8x** | ~1.3x | ~3.8x |
+| 3-bit compression ratio | **~4.9x** | N/A | N/A |
+| Kernel pipeline | **Fused 1-kernel (Triton)** | Multi-kernel (PyTorch) | Multi-kernel (C / Metal / CUDA) |
 | Fused Q·K^T from packed | **Yes** | No | No |
-| Rotation | **RHT O(d log d)** | Dense QR O(d²) | WHT |
-| Storage/layer | **1 KB** | 256 KB | ~1 KB |
-| Layer-aware V | **Yes (configurable)** | No | Yes (fixed boundary) |
-| HuggingFace integration | **Yes** | No | No (llama.cpp) |
+| Rotation | **RHT O(d log d)** | Dense QR O(d²) | Walsh-Hadamard O(d log d) |
+| Rotation storage/layer | **~1 KB** | ~256 KB | ~1 KB |
+| Layer-aware V compression | **Yes (configurable callable)** | No | Yes (fixed boundary only) |
+| HuggingFace integration | **Yes** | No | No (llama.cpp only) |
 | QK norm support | **Yes** | No | N/A |
 
 Full benchmark sweep: `uv run python benchmarks/run_fused_benchmark.py`
@@ -283,15 +337,15 @@ src/fused_turboquant/
 │   ├── hadamard.py         # RHT rotation (Triton primary, PyTorch fallback)
 │   ├── lloyd_max.py        # Lloyd-Max quantizer for Beta distribution
 │   ├── quantizer.py        # TurboQuantMSE: auto-selects fused/unfused
-│   └── packing.py          # Sub-byte packing (4-bit: 2/byte, 2-bit: 4/byte)
+│   └── packing.py          # Sub-byte packing (4-bit: nibble, 3-bit: bitstream, 2-bit: 4/byte)
 ├── kernels/
 │   ├── triton_rht.py       # Standalone RHT kernel
 │   ├── triton_encode.py    # Fused encode: RHT + norm + quantize + pack
 │   ├── triton_decode.py    # Fused decode: unpack + dequant + denorm + inv RHT
-│   └── triton_attention.py # Fused Q·K^T from uint8 indices
+│   └── triton_attention.py # Fused Q·K^T from packed indices (inline nibble unpack)
 ├── hf/
-│   └── fused_cache.py      # Compressed KV storage + fused attention forward
-├── vllm_plugin/            # vLLM backend registration + KV cache hooks
+│   └── fused_cache.py      # Compressed K+V storage + fused attention forward
+├── vllm_plugin/            # Full vLLM attention backend (paged compressed KV cache)
 └── cache/kv_cache.py       # Standalone KV cache wrapper
 ```
 

@@ -51,6 +51,19 @@ if HAS_TRITON:
             is_low = (idx % 2) == 0
             packed_val = tl.load(packed_ptr + pid * stride_packed + pack_idx).to(tl.int32)
             unpacked = tl.where(is_low, packed_val & 0xF, (packed_val >> 4) & 0xF)
+        elif BITS == 3:
+            bit_off = idx * 3
+            byte_idx = bit_off >> 3
+            bit_shift = bit_off & 7
+            packed_total = D * 3 // 8
+            row_base = packed_ptr + pid * stride_packed
+            b0 = tl.load(row_base + byte_idx, mask=idx < D, other=0).to(tl.int32)
+            b1 = tl.load(
+                row_base + byte_idx + 1,
+                mask=(idx < D) & ((byte_idx + 1) < packed_total),
+                other=0,
+            ).to(tl.int32)
+            unpacked = ((b0 | (b1 << 8)) >> bit_shift) & 0x7
         elif BITS == 2:
             pack_idx = idx // 4
             shift = (idx % 4) * 2

@@ -23,7 +23,14 @@ from fused_turboquant.core.hadamard import (
     RHTRotation,
 )
 from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
-from fused_turboquant.core.packing import pack_2bit, pack_nibbles, unpack_2bit, unpack_nibbles
+from fused_turboquant.core.packing import (
+    pack_2bit,
+    pack_3bit,
+    pack_nibbles,
+    unpack_2bit,
+    unpack_3bit,
+    unpack_nibbles,
+)
 
 
 @dataclass
@@ -127,6 +134,8 @@ class TurboQuantMSE:
 
         if self.bits == 4:
             packed = pack_nibbles(indices)
+        elif self.bits == 3:
+            packed = pack_3bit(indices)
         elif self.bits == 2:
             packed = pack_2bit(indices)
         else:
@@ -167,6 +176,8 @@ class TurboQuantMSE:
     def _decode_unfused(self, compressed: CompressedTensor) -> torch.Tensor:
         if compressed.bits == 4:
             indices = unpack_nibbles(compressed.indices, compressed.original_dim)
+        elif compressed.bits == 3:
+            indices = unpack_3bit(compressed.indices, compressed.original_dim)
         elif compressed.bits == 2:
             indices = unpack_2bit(compressed.indices, compressed.original_dim)
         else:

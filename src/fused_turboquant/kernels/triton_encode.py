@@ -92,7 +92,7 @@ if HAS_TRITON:
         quantized = tl.maximum(quantized, 0)
         quantized = tl.minimum(quantized, N_LEVELS - 1)
 
-        # --- Pack nibbles (store to scratch for neighbor access) ---
+        # --- Pack indices (store to scratch for neighbor access) ---
         if BITS == 4:
             tl.store(scratch_ptr + scratch_offset + idx, quantized.to(tl.float32), mask=idx < D)
             tl.debug_barrier()
@@ -105,6 +105,27 @@ if HAS_TRITON:
                 packed.to(tl.uint8),
                 mask=pack_idx < D // 2,
             )
+        elif BITS == 3:
+            tl.store(scratch_ptr + scratch_offset + idx, quantized.to(tl.float32), mask=idx < D)
+            tl.debug_barrier()
+            grp_idx = tl.arange(0, D // 8)
+            base = scratch_ptr + scratch_offset
+            v0 = tl.load(base + grp_idx * 8 + 0).to(tl.int32)
+            v1 = tl.load(base + grp_idx * 8 + 1).to(tl.int32)
+            v2 = tl.load(base + grp_idx * 8 + 2).to(tl.int32)
+            v3 = tl.load(base + grp_idx * 8 + 3).to(tl.int32)
+            v4 = tl.load(base + grp_idx * 8 + 4).to(tl.int32)
+            v5 = tl.load(base + grp_idx * 8 + 5).to(tl.int32)
+            v6 = tl.load(base + grp_idx * 8 + 6).to(tl.int32)
+            v7 = tl.load(base + grp_idx * 8 + 7).to(tl.int32)
+            byte0 = (v0 & 0x7) | ((v1 & 0x7) << 3) | ((v2 & 0x3) << 6)
+            byte1 = ((v2 >> 2) & 0x1) | ((v3 & 0x7) << 1) | ((v4 & 0x7) << 4) | ((v5 & 0x1) << 7)
+            byte2 = ((v5 >> 1) & 0x3) | ((v6 & 0x7) << 2) | ((v7 & 0x7) << 5)
+            out_base = packed_out_ptr + pid * stride_packed
+            grp_mask = grp_idx < D // 8
+            tl.store(out_base + grp_idx * 3 + 0, byte0.to(tl.uint8), mask=grp_mask)
+            tl.store(out_base + grp_idx * 3 + 1, byte1.to(tl.uint8), mask=grp_mask)
+            tl.store(out_base + grp_idx * 3 + 2, byte2.to(tl.uint8), mask=grp_mask)
         elif BITS == 2:
             tl.store(scratch_ptr + scratch_offset + idx, quantized.to(tl.float32), mask=idx < D)
             tl.debug_barrier()
@@ -154,6 +175,8 @@ if HAS_TRITON:
 
         if bits == 4:
             packed_dim = d // 2
+        elif bits == 3:
+            packed_dim = d * 3 // 8
         elif bits == 2:
             packed_dim = d // 4
         else:

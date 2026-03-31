@@ -11,13 +11,24 @@ authors = [
 keywords = [
     "turboquant",
     "kv-cache",
+    "kv-cache-compression",
     "quantization",
     "hadamard",
+    "randomized-hadamard-transform",
     "vllm",
     "triton",
     "llm",
+    "llm-inference",
     "inference",
     "compression",
+    "attention",
+    "kernel-fusion",
+    "pytorch",
+    "huggingface",
+    "transformers",
+    "llama",
+    "qwen",
+    "model-compression",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -55,6 +66,8 @@ all = ["fused-turboquant[cuda,hf,dev,bench]"]
 [project.urls]
 Homepage = "https://github.com/Argonaut790/fused-turboquant"
 Repository = "https://github.com/Argonaut790/fused-turboquant"
+Documentation = "https://github.com/Argonaut790/fused-turboquant#-usage"
+Changelog = "https://github.com/Argonaut790/fused-turboquant/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Argonaut790/fused-turboquant/issues"
 
 [project.entry-points."vllm.general_plugins"]

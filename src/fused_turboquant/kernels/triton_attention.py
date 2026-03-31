@@ -10,10 +10,10 @@ Key math identity (since RHT is orthogonal):
 So pre-rotate the query once with a single RHT call (O(d log d)),
 then per-KV-position work is just: score[s] = norm[s] * sum_d(q_rot[d] * C[idx[s,d]]) * scale
 
-Keys are stored in packed form (nibble-packed for 4-bit, 2-bit packed for 2-bit)
-and unpacked inline in the kernel. This halves K memory for 4-bit and quarters it
-for 2-bit vs storing unpacked uint8 per element, matching TurboQuant Plus compression
-ratios while keeping the fused attention advantage (no separate dequant pass).
+Keys are stored in packed form (nibble-packed for 4-bit, bitstream-packed for 3-bit,
+2-bit packed for 2-bit) and unpacked inline in the kernel. For 3-bit, 8 indices are
+packed into 3 bytes via bitstream encoding and extracted with a two-byte load +
+shift+mask. This gives true 3-bit density (48 bytes for head_dim=128 vs 64 for 4-bit).
 
 Compared to Dejan.ai's fused kernel which uses Dense QR for query rotation (O(d^2)),
 ours uses the Triton fused RHT kernel for query rotation (O(d log d)).
@@ -94,6 +94,27 @@ if HAS_TRITON:
                 packed_val = tl.load(ki_ptrs, mask=combined_mask, other=0).to(tl.int32)
                 is_low = (d_offs % 2) == 0
                 k_idx = tl.where(is_low[None, :], packed_val & 0xF, (packed_val >> 4) & 0xF)
+            elif BITS == 3:
+                bit_off = d_offs * 3
+                byte_idx = bit_off >> 3
+                bit_shift = bit_off & 7
+                packed_total = head_dim * 3 // 8
+                combined_mask = s_mask[:, None] & d_mask[None, :]
+                ki_base = K_idx_ptr + kv_bh * stride_ki_bh
+                b0_ptrs = (ki_base
+                           + s_offs[:, None] * stride_ki_s
+                           + byte_idx[None, :] * stride_ki_d)
+                b1_ptrs = (ki_base
+                           + s_offs[:, None] * stride_ki_s
+                           + (byte_idx + 1)[None, :] * stride_ki_d)
+                b0 = tl.load(b0_ptrs, mask=combined_mask, other=0).to(tl.int32)
+                b1_valid = (byte_idx + 1) < packed_total
+                b1 = tl.load(
+                    b1_ptrs,
+                    mask=combined_mask & b1_valid[None, :],
+                    other=0,
+                ).to(tl.int32)
+                k_idx = ((b0 | (b1 << 8)) >> bit_shift[None, :]) & 0x7
             elif BITS == 2:
                 pack_d = d_offs // 4
                 ki_ptrs = (K_idx_ptr
@@ -143,8 +164,8 @@ def fused_qk_scores_rht(
     Args:
         key_indices: packed uint8 indices. Last dim is packed_dim:
             4-bit: packed_dim = head_dim // 2
+            3-bit: packed_dim = head_dim * 3 // 8  (bitstream packed)
             2-bit: packed_dim = head_dim // 4
-            3-bit: packed_dim = head_dim (no packing)
         bits: quantization bit-width (2, 3, or 4).
 
     Returns: attention scores [batch, n_q_heads, q_len, kv_len]
