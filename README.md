@@ -242,13 +242,15 @@ Both K and V caches are compressed by default (`compress_v=True`). All bit-width
 | **FusedTQ4** (K+V) | 4 | 4.25 | **~3.8x** | K: 68B + V: 68B = 136B |
 | **FusedTQ3** (K+V) | 3 | 3.25 | **~4.9x** | K: 52B + V: 52B = 104B |
 
+> **KV cache compression vs total memory**: The ~3.8x / ~4.9x ratios above are for the **KV cache data only** (512B → 136B or 104B per position). Total GPU memory also includes model weights (~16 GB for Qwen3-8B) which are unchanged by KV compression. At short contexts (4K), the KV cache is small relative to model weights so total memory savings are modest (~2-3%). At long contexts (32K+), the KV cache dominates and savings approach the theoretical ratios. This is why KV cache compression becomes critical at scale — see the measured tables below.
+>
 > **Effective bit-rate**: The nominal `--bits` is the index width; the per-vector fp32 norm adds overhead. For head_dim=128: `bits=3` → 3.25 bits/elem, `bits=4` → 4.25 bits/elem.
 >
 > **Layer-aware V compression**: Use `compress_v="boundary"` to keep the first 2 and last 2 layers at fp16 V precision while compressing the rest. This can recover quality on sensitive models with negligible memory cost. Custom per-layer strategies are also supported via `compress_v=callable`.
 
 #### Measured End-to-End Peak Memory
 
-Peak GPU memory (model weights + KV cache + buffers) during generation on NVIDIA GB10. Compression applies to the **decode phase** — prefill uses Flash Attention on full FP16, then KV is compressed for storage.
+Peak GPU memory (model weights + KV cache + buffers) during generation on NVIDIA GB10. Compression applies to the **decode phase** — prefill uses Flash Attention on full FP16, then KV is compressed for storage. Note: model weights (~16 GB) are constant overhead — the savings below come entirely from the compressed KV cache portion.
 
 Qwen3-8B, K+V compressed, 50 decode tokens per context length:
 
