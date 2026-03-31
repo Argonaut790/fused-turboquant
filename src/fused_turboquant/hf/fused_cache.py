@@ -28,7 +28,6 @@ from typing import Optional
 import torch
 from transformers import DynamicCache
 
-from fused_turboquant.core.packing import unpack_2bit, unpack_nibbles
 from fused_turboquant.core.quantizer import CompressedTensor, TurboQuantMSE
 
 logger = logging.getLogger(__name__)
@@ -123,33 +122,33 @@ class CompressedKVCache(DynamicCache):
         self._compressed_keys: list[Optional[dict]] = []
         self._compressed_values: list[Optional[dict]] = []
 
-    # -- Key compression (unpacked uint8 for fused attention kernel) ----------
+    # -- Key compression (packed uint8, unpacked inline by fused kernel) ------
 
     def store_compressed_key(self, key_states: torch.Tensor, layer_idx: int):
-        """Compress and store key states for a layer."""
+        """Compress and store key states in packed form.
+
+        The fused attention kernel unpacks nibbles/2-bit inline, so we keep
+        K packed just like V for maximum memory density.
+        """
         while len(self._compressed_keys) <= layer_idx:
             self._compressed_keys.append(None)
 
         compressed = self.tq.encode(key_states.float())
 
-        if compressed.bits == 4:
-            indices = unpack_nibbles(compressed.indices, compressed.original_dim)
-        elif compressed.bits == 2:
-            indices = unpack_2bit(compressed.indices, compressed.original_dim)
-        else:
-            indices = compressed.indices
-
-        indices = indices.view(key_states.shape).to(torch.uint8)
+        packed_shape = list(key_states.shape[:-1]) + [compressed.indices.shape[-1]]
+        packed_indices = compressed.indices.view(packed_shape)
         norms = compressed.norms.view(*key_states.shape[:-1])
 
-        entry = {"indices": indices, "norms": norms}
+        entry = {"packed_indices": packed_indices, "norms": norms}
 
         if self._compressed_keys[layer_idx] is None:
             self._compressed_keys[layer_idx] = entry
         else:
             prev = self._compressed_keys[layer_idx]
             self._compressed_keys[layer_idx] = {
-                "indices": torch.cat([prev["indices"], entry["indices"]], dim=2),
+                "packed_indices": torch.cat(
+                    [prev["packed_indices"], entry["packed_indices"]], dim=2,
+                ),
                 "norms": torch.cat([prev["norms"], entry["norms"]], dim=2),
             }
 
@@ -304,6 +303,7 @@ def make_fused_attention_forward(
     rht_signs = quantizer.rotation.signs
     centroids = quantizer.quantizer.levels
     head_dim = quantizer.head_dim
+    bits = quantizer.bits
     scale = 1.0 / math.sqrt(head_dim)
 
     n_heads = getattr(attn_module, "num_heads", None)
@@ -370,13 +370,14 @@ def make_fused_attention_forward(
 
             attn_weights = fused_qk_scores_rht(
                 q_rot,
-                compressed["indices"],
+                compressed["packed_indices"],
                 compressed["norms"],
                 centroids,
                 scale,
+                bits=bits,
             )
 
-            kv_len = compressed["indices"].shape[2]
+            kv_len = compressed["packed_indices"].shape[2]
 
             if attention_mask is not None:
                 if attention_mask.dim() == 4:
@@ -684,12 +685,30 @@ def _smoke_test(
     )
 
 
+def _resolve_compress_v(compress_v, layer_idx: int, n_layers: int) -> bool:
+    """Resolve per-layer V compression decision.
+
+    Supports bool, callable, or preset strings for flexible layer-aware
+    compression strategies.
+    """
+    if isinstance(compress_v, bool):
+        return compress_v
+    if callable(compress_v):
+        return compress_v(layer_idx, n_layers)
+    if compress_v == "boundary":
+        return 2 <= layer_idx < n_layers - 2
+    raise ValueError(
+        f"compress_v must be bool, callable(layer_idx, n_layers) -> bool, "
+        f"or 'boundary', got {compress_v!r}"
+    )
+
+
 def patch_model(
     model,
     bits: int = 4,
     head_dim: int | None = None,
     verify: bool = True,
-    compress_v: bool = True,
+    compress_v: bool | str = True,
 ) -> CompressedKVCache:
     """Patch all full-attention layers in a model to use fused TurboQuant.
 
@@ -702,8 +721,11 @@ def patch_model(
         head_dim: Override head dimension. Auto-detected from config if None.
         verify: Run a single-token smoke test after patching to catch silent
             correctness bugs. Set to False to skip (e.g., for benchmarking).
-        compress_v: Compress value cache in addition to key cache. Defaults
-            to True for maximum memory savings (~2.5x vs K-only ~1.3x).
+        compress_v: Controls value cache compression. Accepts:
+            - True: compress V in all layers (default, maximum memory savings)
+            - False: no V compression (K-only)
+            - "boundary": keep first 2 + last 2 layers at fp16 V, compress rest
+            - callable(layer_idx, n_layers) -> bool: custom per-layer strategy
 
     Returns a CompressedKVCache to pass as past_key_values to model.generate().
     """
@@ -742,18 +764,29 @@ def patch_model(
 
     device = next(model.parameters()).device
     tq = TurboQuantMSE(head_dim=head_dim, bits=bits, device=str(device))
-    cache = CompressedKVCache(tq, compress_v=compress_v)
+    any_v = not isinstance(compress_v, bool) or compress_v
+    cache = CompressedKVCache(tq, compress_v=any_v)
+
+    eligible_names = [
+        name for name, module in model.named_modules()
+        if _is_full_attention_layer(module, name)
+    ]
+    n_layers = len(eligible_names)
 
     patched = 0
     layer_idx = 0
     originals = {}
+    v_compressed_count = 0
 
     for name, module in model.named_modules():
         if _is_full_attention_layer(module, name):
+            layer_compress_v = _resolve_compress_v(compress_v, layer_idx, n_layers)
+            if layer_compress_v:
+                v_compressed_count += 1
             originals[name] = module.forward
             module.forward = make_fused_attention_forward(
                 module, cache, tq, layer_idx, config=config,
-                compress_v=compress_v,
+                compress_v=layer_compress_v,
             )
             patched += 1
             layer_idx += 1
@@ -775,7 +808,12 @@ def patch_model(
                 arch_name,
             )
 
-        kv_mode = "K+V" if compress_v else "K-only"
+        if v_compressed_count == patched:
+            kv_mode = "K+V"
+        elif v_compressed_count == 0:
+            kv_mode = "K-only"
+        else:
+            kv_mode = f"K+V({v_compressed_count}/{patched} layers)"
         logger.info(
             "Patched %d attention layers with fused TurboQuant (%d-bit, %s compression)",
             patched, bits, kv_mode,
