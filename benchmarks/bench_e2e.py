@@ -1,19 +1,21 @@
 """
-End-to-end benchmark: unified 4-way comparison on a real HuggingFace model.
+End-to-end benchmark: comparison on a real HuggingFace model.
 
 Compares:
   1. FP16 baseline (no compression, standard HF generate)
-  2. Ours fused (compressed key storage + fused Triton attention)
-  3. Ours simulation (roundtrip compression, standard attention)
-  4. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
+  2. FusedTQ (compressed key storage + fused Triton attention)
+  3. Dejan.ai TQ (Dense QR rotation, roundtrip quantize/dequantize)
 
-Metrics: throughput (tok/s), peak GPU memory (MB), optional perplexity (WikiText-2).
+Modes:
+  - Standard throughput (default): 5-prompt average, short context
+  - Long-context decode (--long-context): sweep 4K-32K token prompts
+  - Batch throughput (--batch-search): find max batch size per method
 
 Usage:
-    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen2.5-0.5B --bits 4
-    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3.5-9B --bits 4 --quality
-    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen2.5-0.5B --bits 4 --no-dejan
-    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen2.5-0.5B --bits 4 --json results.json
+    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3
+    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --long-context
+    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --batch-search
+    uv run python benchmarks/bench_e2e.py --model Qwen/Qwen3-8B --bits 3 --json results.json
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ def load_model_and_tokenizer(model_name: str, dtype: torch.dtype = torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=dtype,
-        device_map="auto",
+        device_map="cuda:0",
         trust_remote_code=True,
     )
     model.eval()
@@ -92,7 +94,9 @@ def measure_generation(
             kwargs["past_key_values"] = cache_factory()
             kwargs["use_cache"] = True
         with torch.inference_mode():
-            model.generate(**inputs, max_new_tokens=5, do_sample=False, **kwargs)
+            model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False, **kwargs,
+            )
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -211,7 +215,6 @@ def compute_perplexity(
 def build_methods(model, bits: int, include_dejan: bool):
     """Return a list of method dicts, each with label, factory, setup, teardown."""
     from fused_turboquant.hf.fused_cache import patch_model, unpatch_model
-    from fused_turboquant.hf.simulation_cache import make_simulation_cache
 
     methods: list[dict] = []
 
@@ -223,17 +226,10 @@ def build_methods(model, bits: int, include_dejan: bool):
     })
 
     methods.append({
-        "label": f"Ours (fused TQ{bits})",
+        "label": f"FusedTQ{bits} (ours)",
         "factory": "fused",
         "setup": lambda: patch_model(model, bits=bits),
         "teardown": lambda: unpatch_model(model),
-    })
-
-    methods.append({
-        "label": f"Ours (simulation TQ{bits})",
-        "factory": lambda b=bits: make_simulation_cache(bits=b),
-        "setup": None,
-        "teardown": None,
     })
 
     if include_dejan:
@@ -242,7 +238,7 @@ def build_methods(model, bits: int, include_dejan: bool):
             from turboquant_kv_cache import make_quantized_cache
 
             methods.append({
-                "label": f"Dejan.ai (TQ{bits})",
+                "label": f"TQ{bits} (Dejan.ai)",
                 "factory": lambda b=bits: make_quantized_cache(bits=b),
                 "setup": None,
                 "teardown": None,
@@ -272,7 +268,10 @@ def run_throughput(model, tokenizer, methods, max_new_tokens: int) -> dict[str, 
             all_tps, all_mem, all_wall = [], [], []
             for i, prompt in enumerate(PROMPTS):
                 if m["factory"] == "fused":
-                    factory = lambda c=cache_obj: c  # noqa: E731
+                    def fused_factory(c=cache_obj):
+                        c.reset()
+                        return c
+                    factory = fused_factory
                 else:
                     factory = m["factory"]
 
@@ -315,7 +314,12 @@ def run_quality(model, tokenizer, methods, max_length: int, stride: int) -> dict
         try:
             if m["factory"] == "fused":
                 cache_obj = m["setup"]()
-                factory = lambda c=cache_obj: c  # noqa: E731
+
+                def fused_factory(c=cache_obj):
+                    c.reset()
+                    return c
+
+                factory = fused_factory
             elif m["factory"] is not None:
                 factory = m["factory"]
             else:
@@ -347,6 +351,330 @@ def run_quality(model, tokenizer, methods, max_length: int, stride: int) -> dict
                     pass
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Long-context decode benchmark
+# ---------------------------------------------------------------------------
+
+def _load_long_text_ids(tokenizer, max_tokens: int) -> torch.Tensor:
+    """Load WikiText-2 and tokenize into a single long sequence."""
+    from datasets import load_dataset
+
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    text = "\n\n".join(dataset["text"])
+    ids = tokenizer(text, return_tensors="pt").input_ids
+    if ids.shape[1] < max_tokens:
+        reps = (max_tokens // ids.shape[1]) + 1
+        ids = ids.repeat(1, reps)
+    return ids[:, :max_tokens]
+
+
+def measure_generation_from_ids(
+    model,
+    input_ids: torch.Tensor,
+    max_new_tokens: int,
+    cache_factory=None,
+) -> dict:
+    """Measure decode tok/s and peak memory from pre-tokenized input_ids."""
+    device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
+    input_len = input_ids.shape[-1]
+
+    _reset_gpu()
+
+    kwargs = {}
+    if cache_factory is not None:
+        kwargs["past_key_values"] = cache_factory()
+        kwargs["use_cache"] = True
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record()
+
+    t_start = time.perf_counter()
+
+    with torch.inference_mode():
+        output = model.generate(
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            **kwargs,
+        )
+
+    if torch.cuda.is_available():
+        end_evt.record()
+        torch.cuda.synchronize()
+        gpu_ms = start_evt.elapsed_time(end_evt)
+    else:
+        gpu_ms = None
+
+    wall_s = time.perf_counter() - t_start
+    gen_tokens = output.shape[-1] - input_len
+    peak_mem = (
+        torch.cuda.max_memory_allocated() / 1024 / 1024
+        if torch.cuda.is_available() else 0
+    )
+    timing = gpu_ms / 1000.0 if gpu_ms is not None else wall_s
+    tps = gen_tokens / timing if timing > 0 else 0
+
+    return {
+        "gen_tokens": gen_tokens,
+        "wall_time_s": wall_s,
+        "tokens_per_sec": tps,
+        "peak_memory_mb": peak_mem,
+        "context_length": input_len,
+    }
+
+
+def run_long_context(
+    model,
+    tokenizer,
+    methods,
+    context_lengths: list[int],
+    gen_tokens: int = 100,
+) -> dict[str, dict]:
+    """Sweep context lengths and measure decode throughput for each method."""
+    max_ctx = max(context_lengths)
+    print(f"  Loading long text ({max_ctx:,} tokens)...")
+    all_ids = _load_long_text_ids(tokenizer, max_ctx)
+    print(f"  Loaded {all_ids.shape[1]:,} tokens from WikiText-2")
+
+    results: dict[str, dict] = {}
+
+    for m in methods:
+        label = m["label"]
+        print(f"\n  --- {label} ---")
+        method_results: dict[int, dict] = {}
+
+        try:
+            cache_obj = None
+            if m["setup"] is not None:
+                cache_obj = m["setup"]()
+
+            for ctx in context_lengths:
+                ids = all_ids[:, :ctx]
+
+                if m["factory"] == "fused":
+                    def fused_factory(c=cache_obj):
+                        c.reset()
+                        return c
+                    factory = fused_factory
+                else:
+                    factory = m["factory"]
+
+                _reset_gpu()
+                r = measure_generation_from_ids(model, ids, gen_tokens, factory)
+                method_results[ctx] = r
+                print(
+                    f"    ctx={ctx:>6,d}: {r['tokens_per_sec']:>6.1f} tok/s, "
+                    f"{r['peak_memory_mb']:>8.0f} MB peak, "
+                    f"{r['gen_tokens']} tokens in {r['wall_time_s']:.1f}s"
+                )
+
+            if m["teardown"] is not None:
+                m["teardown"]()
+
+            results[label] = method_results
+
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            print(f"    Skipping {label}")
+            if m["teardown"] is not None:
+                try:
+                    m["teardown"]()
+                except Exception:
+                    pass
+
+    return results
+
+
+def print_long_context_table(
+    results: dict[str, dict], model_name: str, bits: int,
+):
+    print(f"\n{'=' * 90}")
+    print("LONG-CONTEXT DECODE THROUGHPUT")
+    print(f"{'=' * 90}")
+    print(f"  Model: {model_name}  |  Bits: {bits}")
+    print()
+
+    methods = list(results.keys())
+    ctx_lengths = sorted(
+        {ctx for m_res in results.values() for ctx in m_res}
+    )
+
+    header_parts = [f"{'Context':>8s}"]
+    for m in methods:
+        header_parts.append(f"{m[:20]:>22s}")
+    print("  " + " | ".join(header_parts))
+    print("  " + "-+-".join(["-" * 8] + ["-" * 22] * len(methods)))
+
+    for ctx in ctx_lengths:
+        row = [f"{ctx:>8,d}"]
+        for m in methods:
+            if ctx in results[m]:
+                r = results[m][ctx]
+                row.append(
+                    f"{r['tokens_per_sec']:>6.1f}/s {r['peak_memory_mb']:>7.0f}MB"
+                )
+            else:
+                row.append(f"{'N/A':>22s}")
+        print("  " + " | ".join(row))
+
+
+# ---------------------------------------------------------------------------
+# Batch throughput benchmark
+# ---------------------------------------------------------------------------
+
+def _try_batch_generate(
+    model, tokenizer, prompt: str, batch_size: int,
+    max_new_tokens: int, cache_factory=None,
+) -> dict | None:
+    """Try generating with a given batch size; return results or None on OOM."""
+    device = next(model.parameters()).device
+    prompts = [prompt] * batch_size
+    inputs = tokenizer(
+        prompts, return_tensors="pt", padding=True, truncation=True,
+    ).to(device)
+    input_len = inputs["input_ids"].shape[-1]
+
+    _reset_gpu()
+
+    kwargs = {}
+    if cache_factory is not None:
+        kwargs["past_key_values"] = cache_factory()
+        kwargs["use_cache"] = True
+
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            start_evt = torch.cuda.Event(enable_timing=True)
+            end_evt = torch.cuda.Event(enable_timing=True)
+            start_evt.record()
+
+        t_start = time.perf_counter()
+
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                **kwargs,
+            )
+
+        if torch.cuda.is_available():
+            end_evt.record()
+            torch.cuda.synchronize()
+            gpu_ms = start_evt.elapsed_time(end_evt)
+        else:
+            gpu_ms = None
+
+        wall_s = time.perf_counter() - t_start
+        total_gen = (output.shape[-1] - input_len) * batch_size
+        peak_mem = (
+            torch.cuda.max_memory_allocated() / 1024 / 1024
+            if torch.cuda.is_available() else 0
+        )
+        timing = gpu_ms / 1000.0 if gpu_ms is not None else wall_s
+        agg_tps = total_gen / timing if timing > 0 else 0
+
+        return {
+            "batch_size": batch_size,
+            "total_gen_tokens": total_gen,
+            "aggregate_tps": agg_tps,
+            "per_seq_tps": agg_tps / batch_size,
+            "wall_time_s": wall_s,
+            "peak_memory_mb": peak_mem,
+        }
+
+    except torch.cuda.OutOfMemoryError:
+        _reset_gpu()
+        return None
+
+
+def run_batch_throughput(
+    model, tokenizer, methods, gen_tokens: int = 100,
+) -> dict[str, dict]:
+    """Find max batch size per method and measure aggregate throughput."""
+    prompt = PROMPTS[0]
+    results: dict[str, dict] = {}
+
+    for m in methods:
+        label = m["label"]
+        print(f"\n  --- {label} ---")
+
+        try:
+            cache_obj = None
+            if m["setup"] is not None:
+                cache_obj = m["setup"]()
+
+            if m["factory"] == "fused":
+                def fused_factory(c=cache_obj):
+                    c.reset()
+                    return c
+                factory = fused_factory
+            else:
+                factory = m["factory"]
+
+            max_batch = 0
+            best_result = None
+            for bs in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]:
+                print(f"    Trying batch_size={bs}...", end=" ", flush=True)
+                r = _try_batch_generate(
+                    model, tokenizer, prompt, bs, gen_tokens, factory,
+                )
+                if r is None:
+                    print("OOM")
+                    break
+                print(
+                    f"{r['aggregate_tps']:.1f} agg tok/s, "
+                    f"{r['peak_memory_mb']:.0f} MB"
+                )
+                max_batch = bs
+                best_result = r
+
+            if m["teardown"] is not None:
+                m["teardown"]()
+
+            if best_result is not None:
+                results[label] = best_result
+
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            print(f"    Skipping {label}")
+            if m["teardown"] is not None:
+                try:
+                    m["teardown"]()
+                except Exception:
+                    pass
+
+    return results
+
+
+def print_batch_table(results: dict[str, dict], model_name: str, bits: int):
+    print(f"\n{'=' * 90}")
+    print("BATCH THROUGHPUT (max batch before OOM)")
+    print(f"{'=' * 90}")
+    print(f"  Model: {model_name}  |  Bits: {bits}")
+    print()
+
+    header = (
+        f"  {'Method':<28s} | {'MaxBatch':>8s} | {'Agg TPS':>10s} "
+        f"| {'Per-Seq':>10s} | {'Peak Mem':>10s}"
+    )
+    print(header)
+    print(
+        f"  {'-' * 28}-+-{'-' * 8}-+-{'-' * 10}"
+        f"-+-{'-' * 10}-+-{'-' * 10}"
+    )
+
+    for label, r in results.items():
+        print(
+            f"  {label:<28s} | {r['batch_size']:>8d} | "
+            f"{r['aggregate_tps']:>8.1f}/s | "
+            f"{r['per_seq_tps']:>8.1f}/s | "
+            f"{r['peak_memory_mb']:>8.0f} MB"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -396,18 +724,29 @@ def print_quality_table(results: dict[str, dict]):
 
 
 def save_json(
-    throughput: dict | None,
-    quality: dict | None,
     model_name: str,
     bits: int,
     path: str,
+    throughput: dict | None = None,
+    quality: dict | None = None,
+    long_context: dict | None = None,
+    batch: dict | None = None,
 ):
+    # Convert int keys (context lengths) to strings for JSON serialization
+    lc_serializable = None
+    if long_context is not None:
+        lc_serializable = {
+            method: {str(k): v for k, v in ctx_dict.items()}
+            for method, ctx_dict in long_context.items()
+        }
+
     data = {
         "model": model_name,
         "bits": bits,
-        "prompts": len(PROMPTS),
         "throughput": throughput,
         "quality": quality,
+        "long_context": lc_serializable,
+        "batch": batch,
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -420,13 +759,13 @@ def save_json(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="End-to-end benchmark: 4-way comparison on a real model",
+        description="End-to-end benchmark: FusedTQ vs TQ vs FP16",
     )
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B",
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B",
                         help="HuggingFace model name")
-    parser.add_argument("--bits", type=int, default=4, choices=[2, 3, 4],
+    parser.add_argument("--bits", type=int, default=3, choices=[2, 3, 4],
                         help="Quantization bit-width")
-    parser.add_argument("--max-new-tokens", type=int, default=200,
+    parser.add_argument("--max-new-tokens", type=int, default=512,
                         help="Max tokens to generate per prompt")
     parser.add_argument("--quality", action="store_true",
                         help="Also run WikiText-2 perplexity benchmark (slow)")
@@ -441,6 +780,17 @@ def main():
     parser.add_argument("--dtype", type=str, default="float16",
                         choices=["float16", "bfloat16"],
                         help="Model dtype")
+    parser.add_argument("--long-context", action="store_true",
+                        help="Run long-context decode sweep (4K-32K tokens)")
+    parser.add_argument("--context-lengths", type=str,
+                        default="4096,8192,16384,32768",
+                        help="Comma-separated context lengths for --long-context")
+    parser.add_argument("--long-context-gen", type=int, default=100,
+                        help="Tokens to generate per context in long-context mode")
+    parser.add_argument("--batch-search", action="store_true",
+                        help="Run batch throughput search (find max batch per method)")
+    parser.add_argument("--batch-gen", type=int, default=100,
+                        help="Tokens to generate per sequence in batch mode")
     args = parser.parse_args()
 
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
@@ -450,29 +800,62 @@ def main():
 
     methods = build_methods(model, args.bits, include_dejan=not args.no_dejan)
 
-    # --- Throughput ---
     print(f"\n{'=' * 78}")
     print(f"BENCHMARKING: {args.model} @ {args.bits}-bit")
     print(f"{'=' * 78}")
 
-    print("\n[1/2] Throughput & Memory")
-    throughput_results = run_throughput(model, tokenizer, methods, args.max_new_tokens)
-    print_throughput_table(throughput_results, args.model, args.bits)
-
-    # --- Quality (optional) ---
+    throughput_results = None
     quality_results = None
-    if args.quality:
-        print("\n[2/2] Perplexity (WikiText-2)")
-        quality_results = run_quality(
-            model, tokenizer, methods, args.max_length, args.stride,
+    long_context_results = None
+    batch_results = None
+
+    run_standard = not args.long_context and not args.batch_search
+
+    # --- Standard throughput (default if no other mode selected) ---
+    if run_standard:
+        print("\n[1/2] Throughput & Memory")
+        throughput_results = run_throughput(
+            model, tokenizer, methods, args.max_new_tokens,
         )
-        print_quality_table(quality_results)
-    else:
-        print("\n[2/2] Perplexity: skipped (use --quality to enable)")
+        print_throughput_table(throughput_results, args.model, args.bits)
+
+        if args.quality:
+            print("\n[2/2] Perplexity (WikiText-2)")
+            quality_results = run_quality(
+                model, tokenizer, methods, args.max_length, args.stride,
+            )
+            print_quality_table(quality_results)
+        else:
+            print("\n[2/2] Perplexity: skipped (use --quality to enable)")
+
+    # --- Long-context decode ---
+    if args.long_context:
+        ctx_lengths = [int(x) for x in args.context_lengths.split(",")]
+        print(f"\nLONG-CONTEXT DECODE (contexts: {ctx_lengths})")
+        long_context_results = run_long_context(
+            model, tokenizer, methods, ctx_lengths, args.long_context_gen,
+        )
+        print_long_context_table(
+            long_context_results, args.model, args.bits,
+        )
+
+    # --- Batch throughput ---
+    if args.batch_search:
+        print("\nBATCH THROUGHPUT SEARCH")
+        batch_results = run_batch_throughput(
+            model, tokenizer, methods, args.batch_gen,
+        )
+        print_batch_table(batch_results, args.model, args.bits)
 
     # --- JSON export ---
     if args.json:
-        save_json(throughput_results, quality_results, args.model, args.bits, args.json)
+        save_json(
+            args.model, args.bits, args.json,
+            throughput=throughput_results,
+            quality=quality_results,
+            long_context=long_context_results,
+            batch=batch_results,
+        )
 
 
 if __name__ == "__main__":

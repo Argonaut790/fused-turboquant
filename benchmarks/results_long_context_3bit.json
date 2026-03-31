@@ -1,0 +1,99 @@
+{
+  "model": "Qwen/Qwen3-8B",
+  "bits": 3,
+  "throughput": null,
+  "quality": null,
+  "long_context": {
+    "FP16 baseline": {
+      "4096": {
+        "gen_tokens": 100,
+        "wall_time_s": 43.36452845670283,
+        "tokens_per_sec": 2.3060470318292143,
+        "peak_memory_mb": 8143.80615234375,
+        "context_length": 4096
+      },
+      "8192": {
+        "gen_tokens": 100,
+        "wall_time_s": 47.94006734434515,
+        "tokens_per_sec": 2.0859514672427806,
+        "peak_memory_mb": 8751.96240234375,
+        "context_length": 8192
+      },
+      "16384": {
+        "gen_tokens": 100,
+        "wall_time_s": 62.9470822783187,
+        "tokens_per_sec": 1.5886462431712258,
+        "peak_memory_mb": 10323.98486328125,
+        "context_length": 16384
+      },
+      "32768": {
+        "gen_tokens": 100,
+        "wall_time_s": 97.01228376105428,
+        "tokens_per_sec": 1.0308870678519397,
+        "peak_memory_mb": 14300.60986328125,
+        "context_length": 32768
+      }
+    },
+    "FusedTQ3 (ours)": {
+      "4096": {
+        "gen_tokens": 100,
+        "wall_time_s": 42.72746343910694,
+        "tokens_per_sec": 2.3406230025274155,
+        "peak_memory_mb": 8006.5576171875,
+        "context_length": 4096
+      },
+      "8192": {
+        "gen_tokens": 100,
+        "wall_time_s": 49.5016178553924,
+        "tokens_per_sec": 2.0203037368832177,
+        "peak_memory_mb": 8477.4638671875,
+        "context_length": 8192
+      },
+      "16384": {
+        "gen_tokens": 100,
+        "wall_time_s": 69.25763226579875,
+        "tokens_per_sec": 1.4439944496463344,
+        "peak_memory_mb": 9774.986328125,
+        "context_length": 16384
+      },
+      "32768": {
+        "gen_tokens": 100,
+        "wall_time_s": 114.7497911285609,
+        "tokens_per_sec": 0.8715200392075078,
+        "peak_memory_mb": 13202.611328125,
+        "context_length": 32768
+      }
+    },
+    "TQ3 (Dejan.ai)": {
+      "4096": {
+        "gen_tokens": 100,
+        "wall_time_s": 40.76621378120035,
+        "tokens_per_sec": 2.4531618573195066,
+        "peak_memory_mb": 11672.86572265625,
+        "context_length": 4096
+      },
+      "8192": {
+        "gen_tokens": 100,
+        "wall_time_s": 47.37942465301603,
+        "tokens_per_sec": 2.1107431052494015,
+        "peak_memory_mb": 12281.19580078125,
+        "context_length": 8192
+      },
+      "16384": {
+        "gen_tokens": 100,
+        "wall_time_s": 64.04649921599776,
+        "tokens_per_sec": 1.5614502335008538,
+        "peak_memory_mb": 13853.21826171875,
+        "context_length": 16384
+      },
+      "32768": {
+        "gen_tokens": 100,
+        "wall_time_s": 98.93342701997608,
+        "tokens_per_sec": 1.0108307354456958,
+        "peak_memory_mb": 17829.02392578125,
+        "context_length": 32768
+      }
+    }
+  },
+  "batch": null
+}

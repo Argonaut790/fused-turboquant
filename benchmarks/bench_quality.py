@@ -4,8 +4,7 @@ Quality benchmark: measure perplexity on WikiText-2 with TurboQuant KV cache.
 Compares:
   1. FP16 baseline (no compression)
   2. Ours fused (compressed keys + fused Triton attention)
-  3. Ours simulation (roundtrip encode/decode, standard attention)
-  4. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
+  3. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
 
 Usage:
     uv run python benchmarks/bench_quality.py --model Qwen/Qwen2.5-0.5B --bits 4
@@ -169,7 +168,6 @@ def main():
     input_ids, windows = load_wikitext(tokenizer, args.max_length, args.stride)
 
     from fused_turboquant.hf.fused_cache import patch_model, unpatch_model
-    from fused_turboquant.hf.simulation_cache import make_simulation_cache
 
     results = {}
 
@@ -189,14 +187,6 @@ def main():
             max_length=args.max_length, stride=args.stride,
         )
         unpatch_model(model)
-
-        # --- Ours: simulation ---
-        results[f"Ours sim TQ{bits}"] = _run_perplexity(
-            f"OURS SIMULATION {bits}-BIT (roundtrip encode/decode)",
-            model, input_ids, windows,
-            cache_factory=lambda b=bits: make_simulation_cache(bits=b),
-            max_length=args.max_length, stride=args.stride,
-        )
 
         # --- Dejan.ai ---
         if not args.no_dejan:
