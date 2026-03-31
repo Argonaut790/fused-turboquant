@@ -1,0 +1,33 @@
+{
+  "model": "Qwen/Qwen3-8B",
+  "bits": 3,
+  "throughput": null,
+  "quality": null,
+  "long_context": null,
+  "batch": {
+    "FP16 baseline": {
+      "batch_size": 64,
+      "total_gen_tokens": 6400,
+      "aggregate_tps": 161.67832841344654,
+      "per_seq_tps": 2.526223881460102,
+      "wall_time_s": 39.58619196526706,
+      "peak_memory_mb": 16727.20751953125
+    },
+    "FusedTQ3 (ours)": {
+      "batch_size": 64,
+      "total_gen_tokens": 6400,
+      "aggregate_tps": 154.95698250784977,
+      "per_seq_tps": 2.4212028516851527,
+      "wall_time_s": 41.303060931153595,
+      "peak_memory_mb": 16492.30126953125
+    },
+    "TQ3 (Dejan.ai)": {
+      "batch_size": 64,
+      "total_gen_tokens": 6400,
+      "aggregate_tps": 159.95846391059197,
+      "per_seq_tps": 2.4993509986029996,
+      "wall_time_s": 40.01150471996516,
+      "peak_memory_mb": 17489.1044921875
+    }
+  }
+}

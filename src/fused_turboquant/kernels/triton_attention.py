@@ -36,7 +36,7 @@ if HAS_TRITON:
             triton.Config({"BLOCK_S": 64, "BLOCK_D": 128}, num_warps=4),
             triton.Config({"BLOCK_S": 128, "BLOCK_D": 128}, num_warps=8),
         ],
-        key=["seq_len", "head_dim"],
+        key=["head_dim"],
     )
     @triton.jit
     def _fused_qk_scores_kernel(
@@ -129,7 +129,8 @@ def fused_qk_scores_rht(
 
     effective_q_heads = n_q_heads * q_len
 
-    grid = (batch * effective_q_heads, triton.cdiv(kv_len, 64))
+    def grid(meta):
+        return (batch * effective_q_heads, triton.cdiv(kv_len, meta["BLOCK_S"]))
 
     _fused_qk_scores_kernel[grid](
         q_flat, ki_flat, kn_flat, centroids, out,

@@ -1,0 +1,23 @@
+{
+  "model": "Qwen/Qwen3-8B",
+  "bits": 3,
+  "prompts": 5,
+  "throughput": {
+    "FP16 baseline": {
+      "avg_tps": 9.887969634672633,
+      "max_peak_memory_mb": 15737.22607421875,
+      "avg_wall_time_s": 51.781489790417254
+    },
+    "FusedTQ3 (ours)": {
+      "avg_tps": 9.491524814014802,
+      "max_peak_memory_mb": 15772.08447265625,
+      "avg_wall_time_s": 53.94402440842241
+    },
+    "TQ3 (Dejan.ai)": {
+      "avg_tps": 9.530231923303564,
+      "max_peak_memory_mb": 15933.4765625,
+      "avg_wall_time_s": 53.72483569644392
+    }
+  },
+  "quality": null
+}

@@ -3,9 +3,8 @@ Throughput benchmark: measure tokens/second for generation.
 
 Compares:
   1. FP16 baseline (no compression, standard HF generate)
-  2. SimulationCache (roundtrip compression, measures overhead)
-  3. FusedTurboQuant cache (compressed keys + fused attention)
-  4. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
+  2. FusedTurboQuant cache (compressed keys + fused attention)
+  3. Dejan.ai (Dense QR rotation, roundtrip quantize/dequantize)
 
 Usage:
     uv run python benchmarks/bench_throughput.py --model Qwen/Qwen2.5-0.5B
@@ -145,11 +144,9 @@ def run_benchmark(
 ):
     """Run full throughput comparison."""
     from fused_turboquant.hf.fused_cache import patch_model, unpatch_model
-    from fused_turboquant.hf.simulation_cache import make_simulation_cache
 
     methods = {
         "FP16 baseline": None,
-        f"SimulationCache TQ{bits}": lambda b=bits: make_simulation_cache(bits=b),
     }
 
     if include_dejan:
