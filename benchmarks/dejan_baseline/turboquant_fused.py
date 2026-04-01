@@ -10,11 +10,12 @@ Usage:
     text = runner.generate("What is 2+2?", max_new_tokens=30)
 """
 
-import torch
 import math
+
+import torch
 from transformers import DynamicCache
-from turboquant_core import TurboQuantMSE
 from triton_attention import fused_qk_scores
+from turboquant_core import TurboQuantMSE
 
 
 class CompressedKVCache(DynamicCache):
@@ -67,7 +68,7 @@ def _apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
     def rotate_half(x):
         x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2:]
+        x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -84,7 +85,9 @@ def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, n_kv_heads * n_rep, slen, head_dim)
 
 
-def make_fused_attention_forward(attn_module, cache: CompressedKVCache, quantizer: TurboQuantMSE, layer_index: int):
+def make_fused_attention_forward(
+    attn_module, cache: CompressedKVCache, quantizer: TurboQuantMSE, layer_index: int
+):
     """Create a replacement forward for a Gemma3 attention layer."""
 
     # Cache the rotation matrix for pre-rotating queries
@@ -95,18 +98,18 @@ def make_fused_attention_forward(attn_module, cache: CompressedKVCache, quantize
     n_heads = attn_module.num_heads
     # num_key_value_heads lives in config, not on the module
     cfg = attn_module.config
-    n_kv_heads = getattr(cfg, 'num_key_value_heads', n_heads)
+    n_kv_heads = getattr(cfg, "num_key_value_heads", n_heads)
     n_kv_groups = n_heads // n_kv_heads
     layer_idx = layer_index  # passed in from enumeration
 
     # Check if this layer uses sliding window attention
-    is_sliding = getattr(attn_module, 'is_sliding', False)
-    sliding_window = getattr(attn_module, 'sliding_window', None)
+    is_sliding = getattr(attn_module, "is_sliding", False)
+    sliding_window = getattr(attn_module, "sliding_window", None)
     if is_sliding and sliding_window is None:
         # Try to get from config
-        config = getattr(attn_module, 'config', None)
+        config = getattr(attn_module, "config", None)
         if config:
-            sliding_window = getattr(config, 'sliding_window', None)
+            sliding_window = getattr(config, "sliding_window", None)
 
     def fused_forward(
         hidden_states: torch.Tensor,
@@ -164,8 +167,7 @@ def make_fused_attention_forward(attn_module, cache: CompressedKVCache, quantize
 
         # Use Triton kernel
         attn_weights = fused_qk_scores(
-            q_rot, compressed["idx"], compressed["norms"],
-            centroids, scale
+            q_rot, compressed["idx"], compressed["norms"], centroids, scale
         )
 
         # Apply attention mask (causal + sliding window if applicable)
@@ -203,11 +205,11 @@ def install_fused_attention(model, bits: int = 4) -> CompressedKVCache:
     """
     # Detect head_dim
     config = model.config
-    if hasattr(config, 'text_config'):
+    if hasattr(config, "text_config"):
         text_config = config.text_config
     else:
         text_config = config
-    head_dim = getattr(text_config, 'head_dim', 256)
+    head_dim = getattr(text_config, "head_dim", 256)
 
     # Create quantizer
     tq = TurboQuantMSE(d=head_dim, bits=bits, device="cuda")
@@ -219,7 +221,10 @@ def install_fused_attention(model, bits: int = 4) -> CompressedKVCache:
     patched = 0
     layer_idx = 0
     for name, module in model.named_modules():
-        if all(hasattr(module, attr) for attr in ['q_proj', 'k_proj', 'v_proj', 'out_proj', 'num_heads']):
+        if all(
+            hasattr(module, attr)
+            for attr in ["q_proj", "k_proj", "v_proj", "out_proj", "num_heads"]
+        ):
             module.forward = make_fused_attention_forward(module, cache, tq, layer_idx)
             patched += 1
             layer_idx += 1
@@ -243,10 +248,15 @@ class FusedTurboQuantRunner:
         # Save original forwards for unpatching
         self._originals: dict[str, callable] = {}
         for name, module in model.named_modules():
-            if all(hasattr(module, attr) for attr in ['q_proj', 'k_proj', 'v_proj', 'out_proj', 'num_heads']):
+            if all(
+                hasattr(module, attr)
+                for attr in ["q_proj", "k_proj", "v_proj", "out_proj", "num_heads"]
+            ):
                 self._originals[name] = module.forward
 
-    def generate(self, prompt: str, max_new_tokens: int = 200, system: str = "You are a helpful assistant."):
+    def generate(
+        self, prompt: str, max_new_tokens: int = 200, system: str = "You are a helpful assistant."
+    ):
         # Install fused attention (creates fresh cache)
         cache = install_fused_attention(self.model, self.bits)
 
@@ -255,8 +265,11 @@ class FusedTurboQuantRunner:
             {"role": "user", "content": [{"type": "text", "text": prompt}]},
         ]
         inputs = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True,
-            return_dict=True, return_tensors="pt"
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
         ).to(self.model.device, dtype=torch.bfloat16)
         input_len = inputs["input_ids"].shape[-1]
 

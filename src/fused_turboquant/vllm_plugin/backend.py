@@ -40,6 +40,7 @@ _TURBOQUANT_BITS = int(os.environ.get("TURBOQUANT_BITS", "4"))
 _AttentionBackendBase: Type = object
 try:
     from vllm.attention.backends.abstract import AttentionBackend
+
     _AttentionBackendBase = AttentionBackend
 except ImportError:
     pass
@@ -69,31 +70,35 @@ class FusedTurboQuantBackend(_AttentionBackendBase):
     @staticmethod
     def get_impl_cls() -> Type:
         from fused_turboquant.vllm_plugin.attention_impl import FusedTurboQuantImpl
+
         return FusedTurboQuantImpl
 
     @staticmethod
     def get_metadata_cls() -> Type:
         from fused_turboquant.vllm_plugin.metadata import get_metadata_cls
+
         return get_metadata_cls()
 
     @staticmethod
     def get_builder_cls() -> Optional[Type]:
         from fused_turboquant.vllm_plugin.metadata import get_builder_cls
+
         return get_builder_cls()
 
     @staticmethod
     def get_state_cls() -> Type:
         from fused_turboquant.vllm_plugin.metadata import get_state_cls
+
         cls = get_state_cls()
         if cls is not None:
             return cls
         try:
             from vllm.attention.backends.abstract import CommonAttentionState
+
             return CommonAttentionState
         except ImportError:
             raise ImportError(
-                "Could not find CommonAttentionState. "
-                "fused-turboquant requires vLLM >= 0.8."
+                "Could not find CommonAttentionState. fused-turboquant requires vLLM >= 0.8."
             )
 
     @staticmethod
@@ -107,7 +112,7 @@ class FusedTurboQuantBackend(_AttentionBackendBase):
 
         Instead of [2, num_blocks, block_size, num_kv_heads, head_size] in fp16,
         we use [2, num_blocks, block_size, num_kv_heads, compressed_elem_size]
-        in uint8, where compressed_elem_size = packed_dim + 4 (norm bytes).
+        in uint8, where compressed_elem_size = packed_dim + 4 (fp32 norm bytes).
         """
         bits = _TURBOQUANT_BITS
         compressed_size = compute_compressed_elem_size(head_size, bits)
@@ -137,6 +142,7 @@ class FusedTurboQuantBackend(_AttentionBackendBase):
             import importlib.util
 
             import torch
+
             if importlib.util.find_spec("fused_turboquant.core.quantizer") is None:
                 return False
             return torch.cuda.is_available()
@@ -156,6 +162,5 @@ class FusedTurboQuantBackend(_AttentionBackendBase):
         """Raise if configuration is incompatible with this backend."""
         if head_size > 0 and (head_size & (head_size - 1)) != 0:
             raise ValueError(
-                f"FUSED_TURBOQUANT requires power-of-2 head_size for RHT, "
-                f"got {head_size}"
+                f"FUSED_TURBOQUANT requires power-of-2 head_size for RHT, got {head_size}"
             )

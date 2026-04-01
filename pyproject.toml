@@ -1,6 +1,6 @@
 [project]
 name = "fused-turboquant"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fused Triton encode/decode kernels for TurboQuant KV cache compression, powered by Randomized Hadamard Transform."
 readme = "README.md"
 license = "Apache-2.0"

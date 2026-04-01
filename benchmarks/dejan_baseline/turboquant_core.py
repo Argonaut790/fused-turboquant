@@ -9,13 +9,14 @@ mathematical properties (random rotation on S^{d-1}), but executes as a
 single torch.matmul — fast on GPU.
 """
 
-import torch
 import math
 
+import torch
 
 # ============================================================================
 # Random orthogonal rotation (replaces Hadamard)
 # ============================================================================
+
 
 def make_rotation_matrix(d: int, seed: int = 0, device: str = "cpu") -> torch.Tensor:
     """Generate a random orthogonal d×d matrix via QR decomposition.
@@ -31,6 +32,7 @@ def make_rotation_matrix(d: int, seed: int = 0, device: str = "cpu") -> torch.Te
 # ============================================================================
 # Lloyd-Max codebook for Beta-distributed coordinates on S^{d-1}
 # ============================================================================
+
 
 def _beta_pdf_unnorm(x: torch.Tensor, d: int) -> torch.Tensor:
     """Unnormalized PDF of coordinate distribution after rotation on S^{d-1}."""
@@ -76,6 +78,7 @@ def build_lloyd_max_codebook(
 # ============================================================================
 # TurboQuant_mse
 # ============================================================================
+
 
 class TurboQuantMSE:
     """MSE-optimal TurboQuant: random orthogonal rotation + b-bit Lloyd-Max.
@@ -141,6 +144,7 @@ class TurboQuantMSE:
 # Self-test
 # ============================================================================
 
+
 def self_test():
     torch.manual_seed(123)
     d, n = 256, 64
@@ -155,8 +159,8 @@ def self_test():
         cos = torch.nn.functional.cosine_similarity(x, x_hat, dim=-1).mean().item()
 
         pairs = 32
-        ip_true = (x[:pairs].unsqueeze(1) * x[pairs:2*pairs].unsqueeze(0)).sum(-1)
-        ip_est = (x_hat[:pairs].unsqueeze(1) * x[pairs:2*pairs].unsqueeze(0)).sum(-1)
+        ip_true = (x[:pairs].unsqueeze(1) * x[pairs : 2 * pairs].unsqueeze(0)).sum(-1)
+        ip_est = (x_hat[:pairs].unsqueeze(1) * x[pairs : 2 * pairs].unsqueeze(0)).sum(-1)
         ip_corr = torch.corrcoef(torch.stack([ip_true.flatten(), ip_est.flatten()]))[0, 1].item()
 
         orig_bytes = x.numel() * 4

@@ -13,9 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 import time
-
 
 PROMPTS = [
     "Explain the theory of general relativity in simple terms.",
@@ -39,7 +37,7 @@ def run_vllm_benchmark(
     """Run offline inference via vLLM and measure throughput."""
     from vllm import LLM, SamplingParams
 
-    print(f"\nvLLM Offline Benchmark")
+    print("\nvLLM Offline Benchmark")
     print(f"  Model: {model_name}")
     print(f"  KV cache dtype: {kv_cache_dtype}")
     print(f"  Tensor parallel: {tp}")
@@ -91,7 +89,7 @@ def run_vllm_benchmark(
         gen_len = len(output.outputs[0].token_ids)
         per_request.append(gen_len)
         first_50 = output.outputs[0].text[:50].replace("\n", " ")
-        print(f"  Prompt {i + 1}: {gen_len} tokens — \"{first_50}...\"")
+        print(f'  Prompt {i + 1}: {gen_len} tokens — "{first_50}..."')
 
     print(f"\n  Avg tokens/request: {sum(per_request) / len(per_request):.0f}")
     print(f"  Throughput: {overall_tps:.1f} tok/s (all {len(PROMPTS)} prompts batched)")
@@ -108,23 +106,26 @@ def run_vllm_benchmark(
 
 def main():
     parser = argparse.ArgumentParser(description="vLLM FP16 baseline throughput benchmark")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B",
-                        help="HuggingFace model name")
-    parser.add_argument("--max-tokens", type=int, default=200,
-                        help="Max tokens to generate per prompt")
-    parser.add_argument("--tp", type=int, default=1,
-                        help="Tensor parallel size")
-    parser.add_argument("--fp8", action="store_true",
-                        help="Use FP8 KV cache (fp8_e5m2)")
-    parser.add_argument("--gpu-mem", type=float, default=0.90,
-                        help="GPU memory utilization for vLLM")
+    parser.add_argument(
+        "--model", type=str, default="Qwen/Qwen2.5-0.5B", help="HuggingFace model name"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=200, help="Max tokens to generate per prompt"
+    )
+    parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--fp8", action="store_true", help="Use FP8 KV cache (fp8_e5m2)")
+    parser.add_argument(
+        "--gpu-mem", type=float, default=0.90, help="GPU memory utilization for vLLM"
+    )
     args = parser.parse_args()
 
     kv_dtype = "fp8_e5m2" if args.fp8 else "auto"
 
     results = [
         run_vllm_benchmark(
-            args.model, args.max_tokens, args.tp,
+            args.model,
+            args.max_tokens,
+            args.tp,
             kv_cache_dtype=kv_dtype,
             gpu_memory_utilization=args.gpu_mem,
         )

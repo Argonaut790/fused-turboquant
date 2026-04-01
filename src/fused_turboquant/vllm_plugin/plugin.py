@@ -38,9 +38,7 @@ def register_backend() -> None:
 
     try:
         registry.register("FUSED_TURBOQUANT", FusedTurboQuantBackend)
-        logger.info(
-            "fused-turboquant: registered FUSED_TURBOQUANT attention backend with vLLM"
-        )
+        logger.info("fused-turboquant: registered FUSED_TURBOQUANT attention backend with vLLM")
     except Exception as e:
         logger.warning("Failed to register FUSED_TURBOQUANT backend: %s", e)
 
@@ -49,12 +47,14 @@ def _get_registry():
     """Try to import the AttentionBackendRegistry from vLLM v1 then v0."""
     try:
         from vllm.v1.attention.backends.registry import AttentionBackendRegistry
+
         return AttentionBackendRegistry
     except ImportError:
         pass
 
     try:
         from vllm.attention.backends.registry import AttentionBackendRegistry
+
         return AttentionBackendRegistry
     except ImportError:
         pass

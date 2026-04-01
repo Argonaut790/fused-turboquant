@@ -94,7 +94,7 @@ def write_compressed_to_slot(
     Args:
         kv_cache: [2, num_blocks, block_size, num_kv_heads, elem_size] uint8.
         packed_indices: [num_kv_heads, packed_dim] uint8.
-        norms: [num_kv_heads] float32.
+        norms: [num_kv_heads] float (any dtype, will be cast to fp32).
         slot_idx: linear slot index (block_idx * block_size + offset).
         kv_type: 0 for K, 1 for V.
     """
@@ -105,7 +105,7 @@ def write_compressed_to_slot(
     packed_dim = packed_indices.shape[-1]
     kv_cache[kv_type, block_idx, offset, :, :packed_dim] = packed_indices
     norm_bytes = norms.to(torch.float32).contiguous().view(torch.uint8).reshape(-1, 4)
-    kv_cache[kv_type, block_idx, offset, :, packed_dim:packed_dim + 4] = norm_bytes
+    kv_cache[kv_type, block_idx, offset, :, packed_dim : packed_dim + 4] = norm_bytes
 
 
 def read_compressed_from_blocks(
@@ -139,7 +139,7 @@ def read_compressed_from_blocks(
         offset = pos % block_size
         slot_data = kv_cache[kv_type, block_idx, offset]  # [num_kv_heads, elem_size]
         all_packed.append(slot_data[:, :packed_dim])
-        norm_bytes = slot_data[:, packed_dim:packed_dim + 4]
+        norm_bytes = slot_data[:, packed_dim : packed_dim + 4]
         norm_f32 = norm_bytes.contiguous().view(torch.float32)
         all_norms.append(norm_f32.squeeze(-1))
 
@@ -177,12 +177,19 @@ def gather_compressed_kv_batched(
     device = kv_cache.device
 
     out_packed = torch.zeros(
-        batch_size, num_kv_heads, max_seq_len, packed_dim,
-        dtype=torch.uint8, device=device,
+        batch_size,
+        num_kv_heads,
+        max_seq_len,
+        packed_dim,
+        dtype=torch.uint8,
+        device=device,
     )
     out_norms = torch.zeros(
-        batch_size, num_kv_heads, max_seq_len,
-        dtype=torch.float32, device=device,
+        batch_size,
+        num_kv_heads,
+        max_seq_len,
+        dtype=torch.float32,
+        device=device,
     )
 
     for b in range(batch_size):
@@ -192,9 +199,7 @@ def gather_compressed_kv_batched(
             offset = pos % block_size
             slot_data = kv_cache[kv_type, block_idx, offset]
             out_packed[b, :, pos, :] = slot_data[:, :packed_dim]
-            norm_bytes = slot_data[:, packed_dim:packed_dim + 4]
-            out_norms[b, :, pos] = norm_bytes.contiguous().view(
-                torch.float32
-            ).squeeze(-1)
+            norm_bytes = slot_data[:, packed_dim : packed_dim + 4]
+            out_norms[b, :, pos] = norm_bytes.contiguous().view(torch.float32).squeeze(-1)
 
     return out_packed, out_norms

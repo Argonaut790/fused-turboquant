@@ -32,6 +32,7 @@ _TURBOQUANT_COMPRESS_V = os.environ.get("TURBOQUANT_COMPRESS_V", "1") == "1"
 _AttentionImplBase: Type = object
 try:
     from vllm.attention.backends.abstract import AttentionImpl
+
     _AttentionImplBase = AttentionImpl
 except ImportError:
     pass
@@ -83,11 +84,7 @@ class FusedTurboQuantImpl(_AttentionImplBase):
         self.num_kv_heads = num_kv_heads or num_heads
         self.num_kv_groups = self.num_heads // self.num_kv_heads
 
-        if sliding_window is not None:
-            raise NotImplementedError(
-                "FUSED_TURBOQUANT does not yet support sliding window attention. "
-                "Use a model without sliding window or a different backend."
-            )
+        self.sliding_window = sliding_window
 
         if alibi_slopes is not None:
             raise NotImplementedError(
@@ -121,8 +118,11 @@ class FusedTurboQuantImpl(_AttentionImplBase):
         logger.info(
             "FusedTurboQuantImpl: layer initialized with %d-bit K%s compression, "
             "head_size=%d, packed_dim=%d, compressed_elem=%d bytes",
-            self.bits, "+V" if self.compress_v else "-only",
-            head_size, self.packed_dim, self.compressed_elem_size,
+            self.bits,
+            "+V" if self.compress_v else "-only",
+            head_size,
+            self.packed_dim,
+            self.compressed_elem_size,
         )
 
     def _compress_and_write_to_cache(
@@ -145,7 +145,7 @@ class FusedTurboQuantImpl(_AttentionImplBase):
 
         k_compressed = self.tq.encode(key_states.float())
         k_packed = k_compressed.indices  # [num_tokens, num_kv_heads, packed_dim]
-        k_norms = k_compressed.norms     # [num_tokens, num_kv_heads]
+        k_norms = k_compressed.norms  # [num_tokens, num_kv_heads]
 
         if self.compress_v:
             v_compressed = self.tq.encode(value_states.float())
@@ -159,22 +159,37 @@ class FusedTurboQuantImpl(_AttentionImplBase):
             block_idx = slot // block_size
             offset = slot % block_size
 
-            kv_cache[0, block_idx, offset, :, :self.packed_dim] = k_packed[i]
-            k_norm_bytes = k_norms[i].contiguous().view(torch.uint8).reshape(
-                self.num_kv_heads, 4,
+            kv_cache[0, block_idx, offset, :, : self.packed_dim] = k_packed[i]
+            k_norm_bytes = (
+                k_norms[i]
+                .float()
+                .contiguous()
+                .view(torch.uint8)
+                .reshape(
+                    self.num_kv_heads,
+                    4,
+                )
             )
-            kv_cache[0, block_idx, offset, :, self.packed_dim:] = k_norm_bytes
+            kv_cache[0, block_idx, offset, :, self.packed_dim : self.packed_dim + 4] = k_norm_bytes
 
             if self.compress_v:
-                kv_cache[1, block_idx, offset, :, :self.packed_dim] = v_packed[i]
-                v_norm_bytes = v_norms[i].contiguous().view(torch.uint8).reshape(
-                    self.num_kv_heads, 4,
+                kv_cache[1, block_idx, offset, :, : self.packed_dim] = v_packed[i]
+                v_norm_bytes = (
+                    v_norms[i]
+                    .float()
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(
+                        self.num_kv_heads,
+                        4,
+                    )
                 )
-                kv_cache[1, block_idx, offset, :, self.packed_dim:] = v_norm_bytes
+                norm_end = self.packed_dim + 4
+                kv_cache[1, block_idx, offset, :, self.packed_dim : norm_end] = v_norm_bytes
             else:
                 v_bytes = value_states[i].contiguous().half().view(torch.uint8)
                 v_bytes = v_bytes.reshape(self.num_kv_heads, self.head_size * 2)
-                kv_cache[1, block_idx, offset, :, :self.head_size * 2] = v_bytes
+                kv_cache[1, block_idx, offset, :, : self.head_size * 2] = v_bytes
 
     def _gather_compressed_k(
         self,
@@ -185,8 +200,11 @@ class FusedTurboQuantImpl(_AttentionImplBase):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Gather compressed K vectors from paged cache for a decode batch."""
         return gather_compressed_kv_batched(
-            kv_cache, block_tables, seq_lens_tensor,
-            kv_type=0, packed_dim=self.packed_dim,
+            kv_cache,
+            block_tables,
+            seq_lens_tensor,
+            kv_type=0,
+            packed_dim=self.packed_dim,
             max_seq_len=max_seq_len,
         )
 
@@ -199,8 +217,11 @@ class FusedTurboQuantImpl(_AttentionImplBase):
     ) -> torch.Tensor:
         """Gather compressed V from paged cache, decompress, return dense."""
         v_packed, v_norms = gather_compressed_kv_batched(
-            kv_cache, block_tables, seq_lens_tensor,
-            kv_type=1, packed_dim=self.packed_dim,
+            kv_cache,
+            block_tables,
+            seq_lens_tensor,
+            kv_type=1,
+            packed_dim=self.packed_dim,
             max_seq_len=max_seq_len,
         )
 
@@ -249,7 +270,10 @@ class FusedTurboQuantImpl(_AttentionImplBase):
 
         if kv_cache is not None and attn_metadata.slot_mapping is not None:
             self._compress_and_write_to_cache(
-                key, value, kv_cache, attn_metadata.slot_mapping,
+                key,
+                value,
+                kv_cache,
+                attn_metadata.slot_mapping,
             )
 
         num_prefill = getattr(attn_metadata, "num_prefill_tokens", 0)
@@ -270,15 +294,23 @@ class FusedTurboQuantImpl(_AttentionImplBase):
             attn_output = torch.cat([prefill_out, decode_out], dim=0)
         elif num_prefill > 0:
             attn_output = self._forward_prefill(
-                query, key, value, attn_metadata,
+                query,
+                key,
+                value,
+                attn_metadata,
             )
         elif num_decode > 0:
             attn_output = self._forward_decode(
-                query, kv_cache, attn_metadata,
+                query,
+                kv_cache,
+                attn_metadata,
             )
         else:
             attn_output = self._forward_prefill(
-                query, key, value, attn_metadata,
+                query,
+                key,
+                value,
+                attn_metadata,
             )
 
         return attn_output.view(num_tokens, self.num_heads * self.head_size)
@@ -312,9 +344,9 @@ class FusedTurboQuantImpl(_AttentionImplBase):
             outputs = []
             offset = 0
             for slen in seq_lens:
-                q_s = query[offset:offset + slen].unsqueeze(0).transpose(1, 2)
-                k_s = key[offset:offset + slen].unsqueeze(0).transpose(1, 2)
-                v_s = value[offset:offset + slen].unsqueeze(0).transpose(1, 2)
+                q_s = query[offset : offset + slen].unsqueeze(0).transpose(1, 2)
+                k_s = key[offset : offset + slen].unsqueeze(0).transpose(1, 2)
+                v_s = value[offset : offset + slen].unsqueeze(0).transpose(1, 2)
 
                 k_s = self._repeat_kv(k_s)
                 v_s = self._repeat_kv(v_s)
@@ -357,12 +389,16 @@ class FusedTurboQuantImpl(_AttentionImplBase):
 
         if seq_lens_tensor is None and hasattr(attn_metadata, "seq_lens"):
             seq_lens_tensor = torch.tensor(
-                attn_metadata.seq_lens, dtype=torch.int32,
+                attn_metadata.seq_lens,
+                dtype=torch.int32,
                 device=query.device,
             )
 
         k_packed, k_norms = self._gather_compressed_k(
-            kv_cache, block_tables, seq_lens_tensor, max_seq_len,
+            kv_cache,
+            block_tables,
+            seq_lens_tensor,
+            max_seq_len,
         )
 
         q_flat = query.float().reshape(-1, self.head_size)
@@ -382,18 +418,27 @@ class FusedTurboQuantImpl(_AttentionImplBase):
             slen = seq_lens_tensor[i].item()
             if slen < max_seq_len:
                 attn_scores[i, :, :, slen:] = float("-inf")
+            if self.sliding_window is not None and slen > self.sliding_window:
+                window_start = slen - self.sliding_window
+                attn_scores[i, :, :, :window_start] = float("-inf")
 
         attn_weights = F.softmax(attn_scores, dim=-1, dtype=torch.float32)
         attn_weights = attn_weights.to(query.dtype)
 
         if self.compress_v:
             decoded_v = self._gather_and_decode_v(
-                kv_cache, block_tables, seq_lens_tensor, max_seq_len,
+                kv_cache,
+                block_tables,
+                seq_lens_tensor,
+                max_seq_len,
             )
             decoded_v = decoded_v.to(query.dtype)
         else:
             decoded_v = self._gather_uncompressed_v(
-                kv_cache, block_tables, seq_lens_tensor, max_seq_len,
+                kv_cache,
+                block_tables,
+                seq_lens_tensor,
+                max_seq_len,
             )
 
         v_expanded = self._repeat_kv(decoded_v)
@@ -413,8 +458,12 @@ class FusedTurboQuantImpl(_AttentionImplBase):
         device = kv_cache.device
 
         out = torch.zeros(
-            batch_size, self.num_kv_heads, max_seq_len, self.head_size,
-            dtype=torch.float16, device=device,
+            batch_size,
+            self.num_kv_heads,
+            max_seq_len,
+            self.head_size,
+            dtype=torch.float16,
+            device=device,
         )
 
         for b in range(batch_size):
@@ -422,9 +471,14 @@ class FusedTurboQuantImpl(_AttentionImplBase):
             for pos in range(slen):
                 block_idx = block_tables[b, pos // block_size].item()
                 offset = pos % block_size
-                v_bytes = kv_cache[1, block_idx, offset, :, :self.head_size * 2]
-                v_fp16 = v_bytes.contiguous().view(torch.float16).reshape(
-                    self.num_kv_heads, self.head_size,
+                v_bytes = kv_cache[1, block_idx, offset, :, : self.head_size * 2]
+                v_fp16 = (
+                    v_bytes.contiguous()
+                    .view(torch.float16)
+                    .reshape(
+                        self.num_kv_heads,
+                        self.head_size,
+                    )
                 )
                 out[b, :, pos, :] = v_fp16
 

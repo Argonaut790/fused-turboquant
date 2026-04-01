@@ -46,21 +46,29 @@ class TestCompressedElemSize:
 class TestKVCacheShape:
     def test_shape_4bit(self):
         shape = FusedTurboQuantBackend.get_kv_cache_shape(
-            num_blocks=100, block_size=16, num_kv_heads=8, head_size=128,
+            num_blocks=100,
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
         )
         assert shape == (2, 100, 16, 8, 68)
 
     def test_shape_3bit(self):
         import os
+
         old = os.environ.get("TURBOQUANT_BITS")
         os.environ["TURBOQUANT_BITS"] = "3"
         try:
             from importlib import reload
 
             import fused_turboquant.vllm_plugin.backend as bmod
+
             reload(bmod)
             shape = bmod.FusedTurboQuantBackend.get_kv_cache_shape(
-                num_blocks=50, block_size=16, num_kv_heads=4, head_size=128,
+                num_blocks=50,
+                block_size=16,
+                num_kv_heads=4,
+                head_size=128,
             )
             assert shape == (2, 50, 16, 4, 52)
         finally:
@@ -111,17 +119,25 @@ class TestGatherCompressed:
         num_blocks = 10
         seq_len = 5
         packed_dim = head_dim // 2
-        elem_size = packed_dim + 4
+        elem_size = compute_compressed_elem_size(head_dim, bits)
 
         tq = TurboQuantMSE(head_dim=head_dim, bits=bits, device="cuda")
 
         kv_cache = torch.zeros(
-            2, num_blocks, block_size, num_kv_heads, elem_size,
-            dtype=torch.uint8, device="cuda",
+            2,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            elem_size,
+            dtype=torch.uint8,
+            device="cuda",
         )
 
         fake_keys = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda",
+            seq_len,
+            num_kv_heads,
+            head_dim,
+            device="cuda",
         )
         compressed = tq.encode(fake_keys.float())
 
@@ -129,17 +145,25 @@ class TestGatherCompressed:
             block_idx = pos // block_size
             offset = pos % block_size
             kv_cache[0, block_idx, offset, :, :packed_dim] = compressed.indices[pos]
-            norm_bytes = compressed.norms[pos].contiguous().view(
-                torch.uint8
-            ).reshape(num_kv_heads, 4)
-            kv_cache[0, block_idx, offset, :, packed_dim:] = norm_bytes
+            norm_bytes = (
+                compressed.norms[pos]
+                .float()
+                .contiguous()
+                .view(torch.uint8)
+                .reshape(num_kv_heads, 4)
+            )
+            kv_cache[0, block_idx, offset, :, packed_dim : packed_dim + 4] = norm_bytes
 
         block_tables = torch.tensor([[0]], dtype=torch.int32, device="cuda")
         seq_lens = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
 
         gathered_packed, gathered_norms = gather_compressed_kv_batched(
-            kv_cache, block_tables, seq_lens,
-            kv_type=0, packed_dim=packed_dim, max_seq_len=seq_len,
+            kv_cache,
+            block_tables,
+            seq_lens,
+            kv_type=0,
+            packed_dim=packed_dim,
+            max_seq_len=seq_len,
         )
 
         assert gathered_packed.shape == (1, num_kv_heads, seq_len, packed_dim)
@@ -152,7 +176,7 @@ class TestGatherCompressed:
             )
             assert torch.allclose(
                 gathered_norms[0, :, pos],
-                compressed.norms[pos],
+                compressed.norms[pos].float(),
                 atol=1e-6,
             )
 
@@ -163,6 +187,7 @@ class TestGatherCompressed:
 
 try:
     from vllm import LLM, SamplingParams
+
     HAS_VLLM = True
 except ImportError:
     HAS_VLLM = False

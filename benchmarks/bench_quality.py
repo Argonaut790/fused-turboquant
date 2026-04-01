@@ -93,8 +93,8 @@ def compute_perplexity(
             outputs = model(ids, **kwargs)
 
         logits = outputs.logits
-        shift_logits = logits[:, -(target_len - 1):, :].contiguous()
-        shift_labels = ids[:, -(target_len - 1) + 1:end].contiguous()
+        shift_logits = logits[:, -(target_len - 1) :, :].contiguous()
+        shift_labels = ids[:, -(target_len - 1) + 1 : end].contiguous()
 
         if shift_logits.shape[1] != shift_labels.shape[1]:
             min_len = min(shift_logits.shape[1], shift_labels.shape[1])
@@ -133,9 +133,12 @@ def _run_perplexity(label, model, input_ids, windows, cache_factory, max_length,
         torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
     r = compute_perplexity(
-        model, input_ids, windows,
+        model,
+        input_ids,
+        windows,
         cache_factory=cache_factory,
-        max_length=max_length, stride=stride,
+        max_length=max_length,
+        stride=stride,
     )
     elapsed = time.time() - t0
     mem = measure_peak_memory()
@@ -148,19 +151,20 @@ def _run_perplexity(label, model, input_ids, windows, cache_factory, max_length,
 
 def main():
     parser = argparse.ArgumentParser(description="Quality benchmark: perplexity on WikiText-2")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B",
-                        help="HuggingFace model name")
-    parser.add_argument("--bits", type=int, nargs="+", default=[4],
-                        help="Bit-widths to test (e.g., --bits 4 2)")
-    parser.add_argument("--max-length", type=int, default=2048,
-                        help="Max sequence length per window")
-    parser.add_argument("--stride", type=int, default=512,
-                        help="Stride between windows")
-    parser.add_argument("--no-dejan", action="store_true",
-                        help="Skip Dejan.ai comparison")
-    parser.add_argument("--dtype", type=str, default="float16",
-                        choices=["float16", "bfloat16"],
-                        help="Model dtype")
+    parser.add_argument(
+        "--model", type=str, default="Qwen/Qwen2.5-0.5B", help="HuggingFace model name"
+    )
+    parser.add_argument(
+        "--bits", type=int, nargs="+", default=[4], help="Bit-widths to test (e.g., --bits 4 2)"
+    )
+    parser.add_argument(
+        "--max-length", type=int, default=2048, help="Max sequence length per window"
+    )
+    parser.add_argument("--stride", type=int, default=512, help="Stride between windows")
+    parser.add_argument("--no-dejan", action="store_true", help="Skip Dejan.ai comparison")
+    parser.add_argument(
+        "--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="Model dtype"
+    )
     args = parser.parse_args()
 
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
@@ -174,7 +178,12 @@ def main():
     # --- FP16 baseline ---
     results["FP16 baseline"] = _run_perplexity(
         "FP16 BASELINE (no compression)",
-        model, input_ids, windows, None, args.max_length, args.stride,
+        model,
+        input_ids,
+        windows,
+        None,
+        args.max_length,
+        args.stride,
     )
 
     for bits in args.bits:
@@ -182,9 +191,12 @@ def main():
         cache = patch_model(model, bits=bits)
         results[f"Ours fused TQ{bits}"] = _run_perplexity(
             f"OURS FUSED {bits}-BIT (compressed keys + fused attention)",
-            model, input_ids, windows,
+            model,
+            input_ids,
+            windows,
             cache_factory=lambda c=cache: c,
-            max_length=args.max_length, stride=args.stride,
+            max_length=args.max_length,
+            stride=args.stride,
         )
         unpatch_model(model)
 
@@ -196,9 +208,12 @@ def main():
 
                 results[f"Dejan.ai TQ{bits}"] = _run_perplexity(
                     f"DEJAN.AI {bits}-BIT (Dense QR, roundtrip)",
-                    model, input_ids, windows,
+                    model,
+                    input_ids,
+                    windows,
                     cache_factory=lambda b=bits: make_quantized_cache(bits=b),
-                    max_length=args.max_length, stride=args.stride,
+                    max_length=args.max_length,
+                    stride=args.stride,
                 )
             except ImportError:
                 print("\n  WARNING: Could not import Dejan baseline — skipping.")
@@ -209,8 +224,10 @@ def main():
     print("SUMMARY")
     print(f"{'=' * 70}")
     print(f"  Model: {args.model}")
-    hdr = (f"  {'Method':<28s} | {'Perplexity':>12s} | {'Delta':>8s} "
-           f"| {'Time':>8s} | {'Peak Mem':>10s}")
+    hdr = (
+        f"  {'Method':<28s} | {'Perplexity':>12s} | {'Delta':>8s} "
+        f"| {'Time':>8s} | {'Peak Mem':>10s}"
+    )
     print(hdr)
     print(f"  {'-' * 28}-+-{'-' * 12}-+-{'-' * 8}-+-{'-' * 8}-+-{'-' * 10}")
 
@@ -218,8 +235,10 @@ def main():
     for key, r in results.items():
         delta = r["perplexity"] - baseline_ppl
         delta_str = "baseline" if key == "FP16 baseline" else f"+{delta:.2f}"
-        print(f"  {key:<28s} | {r['perplexity']:>12.2f} | {delta_str:>8s} | "
-              f"{r['time_s']:>7.1f}s | {r['peak_memory_mb']:>8.0f} MB")
+        print(
+            f"  {key:<28s} | {r['perplexity']:>12.2f} | {delta_str:>8s} | "
+            f"{r['time_s']:>7.1f}s | {r['peak_memory_mb']:>8.0f} MB"
+        )
 
 
 if __name__ == "__main__":

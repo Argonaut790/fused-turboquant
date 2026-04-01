@@ -13,15 +13,12 @@ Unfused decode: 4+ kernels (unpack, gather, multiply, inv RHT)
 
 import sys
 import time
+
 import torch
-import numpy as np
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "src"))
 
-from fused_turboquant.core.hadamard import RHTRotation, DenseQRRotation
-from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
-from fused_turboquant.core.packing import pack_nibbles, unpack_nibbles, pack_2bit, unpack_2bit
-from fused_turboquant.core.quantizer import TurboQuantMSE, CompressedTensor
+from fused_turboquant.core.quantizer import TurboQuantMSE
 
 
 def _fmt_tps(tps: float) -> str:
@@ -56,9 +53,11 @@ def bench_fused_vs_unfused(device: str):
 
     for bits in BITS_LIST:
         print(f"--- {bits}-bit quantization, batch={N_VECTORS} ---")
-        print(f"{'head_dim':>10s} | {'Fused enc':>12s} | {'Unfused enc':>12s} | "
-              f"{'Enc speedup':>12s} | {'Fused TPS':>12s} | {'Unfused TPS':>12s} | "
-              f"{'Dec speedup':>12s} | {'Quality':>8s}")
+        print(
+            f"{'head_dim':>10s} | {'Fused enc':>12s} | {'Unfused enc':>12s} | "
+            f"{'Enc speedup':>12s} | {'Fused TPS':>12s} | {'Unfused TPS':>12s} | "
+            f"{'Dec speedup':>12s} | {'Quality':>8s}"
+        )
         print("-" * 110)
 
         for dim in DIMS:
@@ -89,14 +88,18 @@ def bench_fused_vs_unfused(device: str):
             x_hat_unfused = tq_unfused.decode(compressed_unfused)
 
             cos_fused = torch.nn.functional.cosine_similarity(x, x_hat_fused, dim=-1).mean().item()
-            cos_unfused = torch.nn.functional.cosine_similarity(x, x_hat_unfused, dim=-1).mean().item()
+            cos_unfused = (
+                torch.nn.functional.cosine_similarity(x, x_hat_unfused, dim=-1).mean().item()
+            )
 
             tps_fused = N_VECTORS / (t_fused_enc / 1000)
             tps_unfused = N_VECTORS / (t_unfused_enc / 1000)
 
-            print(f"{dim:>10d} | {t_fused_enc:>10.3f}ms | {t_unfused_enc:>10.3f}ms | "
-                  f"{speedup_enc:>11.2f}x | {_fmt_tps(tps_fused):>12s} | {_fmt_tps(tps_unfused):>12s} | "
-                  f"{speedup_dec:>11.2f}x | {cos_fused:>7.4f}")
+            print(
+                f"{dim:>10d} | {t_fused_enc:>10.3f}ms | {t_unfused_enc:>10.3f}ms | "
+                f"{speedup_enc:>11.2f}x | {_fmt_tps(tps_fused):>12s} | {_fmt_tps(tps_unfused):>12s} | "
+                f"{speedup_dec:>11.2f}x | {cos_fused:>7.4f}"
+            )
 
         print()
 
@@ -115,8 +118,10 @@ def bench_scaling_encode(device: str):
     tq_unfused = TurboQuantMSE(head_dim=dim, bits=bits, device=device)
     tq_unfused._use_fused_triton = False
 
-    print(f"{'Batch':>10s} | {'Fused (ms)':>12s} | {'Unfused (ms)':>12s} | "
-          f"{'Speedup':>8s} | {'Fused tok/s':>12s} | {'Unfused tok/s':>12s}")
+    print(
+        f"{'Batch':>10s} | {'Fused (ms)':>12s} | {'Unfused (ms)':>12s} | "
+        f"{'Speedup':>8s} | {'Fused tok/s':>12s} | {'Unfused tok/s':>12s}"
+    )
     print("-" * 80)
 
     for n in [128, 512, 1024, 2048, 4096, 8192]:
@@ -130,8 +135,10 @@ def bench_scaling_encode(device: str):
         tok_fused = n / (t_fused / 1000)
         tok_unfused = n / (t_unfused / 1000)
 
-        print(f"{n:>10d} | {t_fused:>10.3f}   | {t_unfused:>10.3f}   | "
-              f"{speedup:>7.2f}x | {tok_fused:>10.0f}   | {tok_unfused:>10.0f}")
+        print(
+            f"{n:>10d} | {t_fused:>10.3f}   | {t_unfused:>10.3f}   | "
+            f"{speedup:>7.2f}x | {tok_fused:>10.0f}   | {tok_unfused:>10.0f}"
+        )
 
     print()
 
@@ -144,7 +151,9 @@ def bench_dejan_comparison(device: str):
     print()
 
     try:
-        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent / "dejan_baseline"))
+        sys.path.insert(
+            0, str(__import__("pathlib").Path(__file__).resolve().parent / "dejan_baseline")
+        )
         from turboquant_core import TurboQuantMSE as DejanTQ
     except ImportError:
         print("  Dejan.ai baseline not available, skipping.")
@@ -160,9 +169,11 @@ def bench_dejan_comparison(device: str):
     tq_ours = TurboQuantMSE(head_dim=dim, bits=bits, device=device)
     tq_dejan = DejanTQ(d=dim, bits=bits, device=device)
 
-    hdr = (f"  {'Batch':>8s} | {'Ours enc':>10s} | {'Dejan enc':>10s} | "
-           f"{'Enc TPS ours':>13s} | {'Enc TPS Dejan':>13s} | {'Enc x':>6s} | "
-           f"{'Dec TPS ours':>13s} | {'Dec TPS Dejan':>13s} | {'Dec x':>6s}")
+    hdr = (
+        f"  {'Batch':>8s} | {'Ours enc':>10s} | {'Dejan enc':>10s} | "
+        f"{'Enc TPS ours':>13s} | {'Enc TPS Dejan':>13s} | {'Enc x':>6s} | "
+        f"{'Dec TPS ours':>13s} | {'Dec TPS Dejan':>13s} | {'Dec x':>6s}"
+    )
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
@@ -185,9 +196,11 @@ def bench_dejan_comparison(device: str):
         enc_x = t_dejan_enc / t_ours_enc
         dec_x = t_dejan_dec / t_ours_dec
 
-        print(f"  {n:>8d} | {t_ours_enc:>8.3f}ms | {t_dejan_enc:>8.3f}ms | "
-              f"{_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
-              f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x")
+        print(
+            f"  {n:>8d} | {t_ours_enc:>8.3f}ms | {t_dejan_enc:>8.3f}ms | "
+            f"{_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
+            f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x"
+        )
 
     print()
 
@@ -196,9 +209,11 @@ def bench_dejan_comparison(device: str):
     print()
     n = 2048
 
-    hdr2 = (f"  {'head_dim':>8s} | {'Ours enc TPS':>13s} | {'Dejan enc TPS':>13s} | {'Enc x':>6s} | "
-            f"{'Ours dec TPS':>13s} | {'Dejan dec TPS':>13s} | {'Dec x':>6s} | "
-            f"{'Ours cos':>9s} | {'Dejan cos':>9s}")
+    hdr2 = (
+        f"  {'head_dim':>8s} | {'Ours enc TPS':>13s} | {'Dejan enc TPS':>13s} | {'Enc x':>6s} | "
+        f"{'Ours dec TPS':>13s} | {'Dejan dec TPS':>13s} | {'Dec x':>6s} | "
+        f"{'Ours cos':>9s} | {'Dejan cos':>9s}"
+    )
     print(hdr2)
     print("  " + "-" * (len(hdr2) - 2))
 
@@ -230,9 +245,11 @@ def bench_dejan_comparison(device: str):
         enc_x = t_dejan_enc / t_ours_enc
         dec_x = t_dejan_dec / t_ours_dec
 
-        print(f"  {dim:>8d} | {_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
-              f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x | "
-              f"{cos_ours:>9.4f} | {cos_dejan:>9.4f}")
+        print(
+            f"  {dim:>8d} | {_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
+            f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x | "
+            f"{cos_ours:>9.4f} | {cos_dejan:>9.4f}"
+        )
 
     print()
 
@@ -242,9 +259,11 @@ def bench_dejan_comparison(device: str):
     dim = 256
     n = 2048
 
-    hdr3 = (f"  {'Bits':>5s} | {'Ours enc TPS':>13s} | {'Dejan enc TPS':>13s} | {'Enc x':>6s} | "
-            f"{'Ours dec TPS':>13s} | {'Dejan dec TPS':>13s} | {'Dec x':>6s} | "
-            f"{'Ours cos':>9s} | {'Dejan cos':>9s}")
+    hdr3 = (
+        f"  {'Bits':>5s} | {'Ours enc TPS':>13s} | {'Dejan enc TPS':>13s} | {'Enc x':>6s} | "
+        f"{'Ours dec TPS':>13s} | {'Dejan dec TPS':>13s} | {'Dec x':>6s} | "
+        f"{'Ours cos':>9s} | {'Dejan cos':>9s}"
+    )
     print(hdr3)
     print("  " + "-" * (len(hdr3) - 2))
 
@@ -279,9 +298,11 @@ def bench_dejan_comparison(device: str):
         ours_bytes = comp_ours.indices.numel() + comp_ours.norms.numel() * 4
         dejan_bytes = dejan_q["idx"].numel() + dejan_q["norms"].numel() * 2
 
-        print(f"  {bits:>5d} | {_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
-              f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x | "
-              f"{cos_ours:>9.4f} | {cos_dejan:>9.4f}")
+        print(
+            f"  {bits:>5d} | {_fmt_tps(tps_ours_enc):>13s} | {_fmt_tps(tps_dejan_enc):>13s} | {enc_x:>5.2f}x | "
+            f"{_fmt_tps(tps_ours_dec):>13s} | {_fmt_tps(tps_dejan_dec):>13s} | {dec_x:>5.2f}x | "
+            f"{cos_ours:>9.4f} | {cos_dejan:>9.4f}"
+        )
 
     print()
 
@@ -289,24 +310,28 @@ def bench_dejan_comparison(device: str):
     print("  Part 4: Memory per token (head_dim=256)")
     print()
     dim = 256
-    print(f"  {'Bits':>5s} | {'Ours (bytes/token)':>18s} | {'Dejan (bytes/token)':>19s} | {'Savings':>8s} | {'Reason':>35s}")
+    print(
+        f"  {'Bits':>5s} | {'Ours (bytes/token)':>18s} | {'Dejan (bytes/token)':>19s} | {'Savings':>8s} | {'Reason':>35s}"
+    )
     print(f"  {'-' * 5}-+-{'-' * 18}-+-{'-' * 19}-+-{'-' * 8}-+-{'-' * 35}")
     for bits in [4, 3, 2]:
         if bits == 4:
-            ours_per_tok = dim // 2 + 4    # packed nibbles + fp32 norm
-            dejan_per_tok = dim * 1 + 2    # 1 byte per index + fp16 norm
+            ours_per_tok = dim // 2 + 4  # packed nibbles + fp32 norm
+            dejan_per_tok = dim * 1 + 2  # 1 byte per index + fp16 norm
             reason = "nibble packing: 2 indices/byte"
         elif bits == 3:
-            ours_per_tok = dim * 1 + 4     # no packing for 3-bit + fp32 norm
-            dejan_per_tok = dim * 1 + 2    # 1 byte per index + fp16 norm
+            ours_per_tok = dim * 1 + 4  # no packing for 3-bit + fp32 norm
+            dejan_per_tok = dim * 1 + 2  # 1 byte per index + fp16 norm
             reason = "same: no sub-byte packing at 3-bit"
         else:
-            ours_per_tok = dim // 4 + 4    # 4 indices/byte + fp32 norm
-            dejan_per_tok = dim * 1 + 2    # 1 byte per index + fp16 norm
+            ours_per_tok = dim // 4 + 4  # 4 indices/byte + fp32 norm
+            dejan_per_tok = dim * 1 + 2  # 1 byte per index + fp16 norm
             reason = "2-bit packing: 4 indices/byte"
 
         savings = dejan_per_tok / ours_per_tok
-        print(f"  {bits:>5d} | {ours_per_tok:>18d} | {dejan_per_tok:>19d} | {savings:>7.2f}x | {reason:>35s}")
+        print(
+            f"  {bits:>5d} | {ours_per_tok:>18d} | {dejan_per_tok:>19d} | {savings:>7.2f}x | {reason:>35s}"
+        )
 
     print()
 
@@ -317,10 +342,14 @@ def bench_dejan_comparison(device: str):
     print(f"  {'-' * 30}-+-{'-' * 25}-+-{'-' * 25}")
     print(f"  {'Pipeline':>30s} | {'Fused 1-kernel Triton':>25s} | {'Multi-kernel PyTorch':>25s}")
     print(f"  {'Rotation':>30s} | {'RHT O(d log d)':>25s} | {'Dense QR O(d^2)':>25s}")
-    print(f"  {'Rotation storage/layer':>30s} | {'1 KB (d signs)':>25s} | {'256 KB (d x d matrix)':>25s}")
+    print(
+        f"  {'Rotation storage/layer':>30s} | {'1 KB (d signs)':>25s} | {'256 KB (d x d matrix)':>25s}"
+    )
     print(f"  {'Kernel launches (encode)':>30s} | {'1':>25s} | {'3+':>25s}")
     print(f"  {'Kernel launches (decode)':>30s} | {'1':>25s} | {'3+':>25s}")
-    print(f"  {'Nibble packing (4-bit)':>30s} | {'Yes (2 per byte)':>25s} | {'No (1 per byte)':>25s}")
+    print(
+        f"  {'Nibble packing (4-bit)':>30s} | {'Yes (2 per byte)':>25s} | {'No (1 per byte)':>25s}"
+    )
     print(f"  {'2-bit packing':>30s} | {'Yes (4 per byte)':>25s} | {'No (1 per byte)':>25s}")
     print(f"  {'Value (V) compression':>30s} | {'Yes':>25s} | {'No (K only)':>25s}")
     print(f"  {'Norm precision':>30s} | {'fp32':>25s} | {'fp16':>25s}")
@@ -343,12 +372,15 @@ def bench_four_way(device: str):
     dim = 256
     bits = 4
     n_heads_kv = 4
-    scale = 1.0 / (dim ** 0.5)
+    scale = 1.0 / (dim**0.5)
     fp16_bytes_per_tok = dim * 2
 
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent / "dejan_baseline"))
+    sys.path.insert(
+        0, str(__import__("pathlib").Path(__file__).resolve().parent / "dejan_baseline")
+    )
     try:
         from turboquant_core import TurboQuantMSE as DejanTQ
+
         has_dejan = True
     except ImportError:
         has_dejan = False
@@ -394,7 +426,10 @@ def bench_four_way(device: str):
     W = 18
 
     def _header():
-        print(f"  {'':>22s} | {'FP16 (no quant)':>{W}s} | {'Ours (fused)':>{W}s} | {'Ours (unfused)':>{W}s}", end="")
+        print(
+            f"  {'':>22s} | {'FP16 (no quant)':>{W}s} | {'Ours (fused)':>{W}s} | {'Ours (unfused)':>{W}s}",
+            end="",
+        )
         if has_dejan:
             print(f" | {'Dejan.ai':>{W}s}", end="")
         print()
@@ -403,7 +438,16 @@ def bench_four_way(device: str):
             print(f"-+-{'-' * W}", end="")
         print()
 
-    def _row(label, fp16_val, fused_val, unfused_val, dejan_val=None, fmt="s", best="max", include_fp16_in_best=False):
+    def _row(
+        label,
+        fp16_val,
+        fused_val,
+        unfused_val,
+        dejan_val=None,
+        fmt="s",
+        best="max",
+        include_fp16_in_best=False,
+    ):
         vals = [fused_val, unfused_val]
         if dejan_val is not None:
             vals.append(dejan_val)
@@ -437,7 +481,9 @@ def bench_four_way(device: str):
                 s = f"*{s}*"
             return f"{s:>{W}s}"
 
-        print(f"  {label:>22s} | {_f(fp16_val, True)} | {_f(fused_val)} | {_f(unfused_val)}", end="")
+        print(
+            f"  {label:>22s} | {_f(fp16_val, True)} | {_f(fused_val)} | {_f(unfused_val)}", end=""
+        )
         if has_dejan:
             print(f" | {_f(dejan_val)}", end="")
         print()
@@ -453,9 +499,24 @@ def bench_four_way(device: str):
     _row("Encode TPS", None, tps_fused_enc, tps_unfused_enc, tps_dejan_enc, fmt="tps", best="max")
     _row("Decode TPS", None, tps_fused_dec, tps_unfused_dec, tps_dejan_dec, fmt="tps", best="max")
     _row("Quality (cosine sim)", 1.0, cos_fused, cos_unfused, cos_dejan, fmt="cos", best="max")
-    _row("Bytes/token", fp16_bytes_per_tok, fused_bytes, unfused_bytes, dejan_bytes, fmt="bytes", best="min")
-    _row("Compression", 1.0, fp16_bytes_per_tok / fused_bytes, fp16_bytes_per_tok / unfused_bytes,
-         fp16_bytes_per_tok / dejan_bytes if dejan_bytes else None, fmt="ratio", best="max")
+    _row(
+        "Bytes/token",
+        fp16_bytes_per_tok,
+        fused_bytes,
+        unfused_bytes,
+        dejan_bytes,
+        fmt="bytes",
+        best="min",
+    )
+    _row(
+        "Compression",
+        1.0,
+        fp16_bytes_per_tok / fused_bytes,
+        fp16_bytes_per_tok / unfused_bytes,
+        fp16_bytes_per_tok / dejan_bytes if dejan_bytes else None,
+        fmt="ratio",
+        best="max",
+    )
     print()
 
     # ---- Part 2: End-to-end inference TPS (simulated decode step) ----
@@ -527,10 +588,26 @@ def bench_four_way(device: str):
         tps_e2e_unfused = n_heads_kv / (t_e2e_unfused / 1000)
         tps_e2e_dejan = n_heads_kv / (t_e2e_dejan / 1000) if t_e2e_dejan else None
 
-        _row("Inference TPS", tps_fp16, tps_e2e_fused, tps_e2e_unfused, tps_e2e_dejan,
-             fmt="tps", best="max", include_fp16_in_best=True)
-        _row("Latency/step", t_fp16, t_e2e_fused, t_e2e_unfused, t_e2e_dejan,
-             fmt="ms", best="min", include_fp16_in_best=True)
+        _row(
+            "Inference TPS",
+            tps_fp16,
+            tps_e2e_fused,
+            tps_e2e_unfused,
+            tps_e2e_dejan,
+            fmt="tps",
+            best="max",
+            include_fp16_in_best=True,
+        )
+        _row(
+            "Latency/step",
+            t_fp16,
+            t_e2e_fused,
+            t_e2e_unfused,
+            t_e2e_dejan,
+            fmt="ms",
+            best="min",
+            include_fp16_in_best=True,
+        )
 
         # Memory for full cache at this context length
         fp16_mem = ctx_len * dim * 2
@@ -545,7 +622,10 @@ def bench_four_way(device: str):
                 return f"{b / 1024 / 1024:.1f} MB"
             return f"{b / 1024:.1f} KB"
 
-        print(f"  {'KV cache memory':>22s} | {_fmt_mem(fp16_mem):>{W}s} | {_fmt_mem(fused_mem):>{W}s} | {_fmt_mem(unfused_mem):>{W}s}", end="")
+        print(
+            f"  {'KV cache memory':>22s} | {_fmt_mem(fp16_mem):>{W}s} | {_fmt_mem(fused_mem):>{W}s} | {_fmt_mem(unfused_mem):>{W}s}",
+            end="",
+        )
         if has_dejan:
             print(f" | {_fmt_mem(dejan_mem):>{W}s}", end="")
         print()
@@ -599,13 +679,17 @@ def bench_kernel_launch_overhead(device: str):
 
     tq._use_fused_triton = True
 
-    print(f"  Single vector  (batch=1):     fused={t_fused_small:.3f}ms  unfused={t_unfused_small:.3f}ms  "
-          f"speedup={t_unfused_small / t_fused_small:.2f}x")
-    print(f"  Large batch (batch=8192):    fused={t_fused_large:.3f}ms  unfused={t_unfused_large:.3f}ms  "
-          f"speedup={t_unfused_large / t_fused_large:.2f}x")
+    print(
+        f"  Single vector  (batch=1):     fused={t_fused_small:.3f}ms  unfused={t_unfused_small:.3f}ms  "
+        f"speedup={t_unfused_small / t_fused_small:.2f}x"
+    )
+    print(
+        f"  Large batch (batch=8192):    fused={t_fused_large:.3f}ms  unfused={t_unfused_large:.3f}ms  "
+        f"speedup={t_unfused_large / t_fused_large:.2f}x"
+    )
     print()
-    print(f"  At batch=1, kernel launch overhead dominates.")
-    print(f"  The fused kernel avoids ~4 extra launches (~5us each = ~20us overhead).")
+    print("  At batch=1, kernel launch overhead dominates.")
+    print("  The fused kernel avoids ~4 extra launches (~5us each = ~20us overhead).")
     print()
 
 
@@ -622,6 +706,7 @@ def main():
     print(f"PyTorch: {torch.__version__}")
     try:
         import triton
+
         print(f"Triton: {triton.__version__}")
     except ImportError:
         print("Triton: NOT AVAILABLE")

@@ -96,12 +96,24 @@ class LloydMaxQuantizer:
     layers, heads, and tokens — zero per-block overhead.
     """
 
-    def __init__(self, dim: int, bits: int = 4, device: torch.device | str = "cpu"):
+    def __init__(
+        self,
+        dim: int,
+        bits: int = 4,
+        device: torch.device | str = "cpu",
+        max_iterations: int = 300,
+        num_grid_points: int = 50000,
+    ):
         self.dim = dim
         self.bits = bits
         self.num_levels = 1 << bits
 
-        boundaries_np, levels_np = _get_cached_codebook(dim, bits)
+        boundaries_np, levels_np = _get_cached_codebook(
+            dim,
+            bits,
+            max_iterations,
+            num_grid_points,
+        )
 
         self.boundaries = torch.tensor(boundaries_np, dtype=torch.float32, device=device)
         self.levels = torch.tensor(levels_np, dtype=torch.float32, device=device)
@@ -130,6 +142,114 @@ class LloydMaxQuantizer:
 
 
 @lru_cache(maxsize=32)
-def _get_cached_codebook(dim: int, bits: int) -> tuple[np.ndarray, np.ndarray]:
-    """Cache codebook computation — same (dim, bits) always yields same result."""
-    return compute_lloyd_max_codebook(dim, bits)
+def _get_cached_codebook(
+    dim: int,
+    bits: int,
+    max_iterations: int = 300,
+    num_grid_points: int = 50000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cache codebook computation — same (dim, bits, params) always yields same result."""
+    return compute_lloyd_max_codebook(dim, bits, max_iterations, num_grid_points)
+
+
+def compute_empirical_codebook(
+    data: np.ndarray,
+    bits: int,
+    max_iterations: int = 300,
+    num_grid_points: int = 50000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute Lloyd-Max codebook from empirical data distribution.
+
+    Instead of assuming a Beta((d-3)/2, (d-3)/2) distribution, this fits the
+    codebook to the actual post-rotation coordinate distribution observed in
+    calibration data. Costs ~128 bytes per layer to store (negligible) but
+    can measurably improve quality at no compression cost.
+
+    Args:
+        data: 1-D array of normalized post-rotation coordinate values.
+        bits: quantization bits.
+        max_iterations: Lloyd-Max iterations.
+        num_grid_points: grid density for PDF approximation.
+
+    Returns:
+        (boundaries, levels) as numpy arrays.
+    """
+    num_levels = 1 << bits
+
+    lo = float(np.percentile(data, 0.01))
+    hi = float(np.percentile(data, 99.99))
+    grid = np.linspace(lo, hi, num_grid_points)
+
+    hist, bin_edges = np.histogram(data, bins=num_grid_points, density=True)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    weights = np.interp(grid, bin_centers, hist)
+    total = weights.sum()
+    if total > 0:
+        weights /= total
+
+    cdf = np.cumsum(weights)
+    quantiles = np.linspace(0, 1, num_levels + 1)
+    boundaries = np.interp(quantiles, cdf, grid)
+    boundaries[0] = lo
+    boundaries[-1] = hi
+
+    levels = np.zeros(num_levels)
+    for i in range(num_levels):
+        mask = (grid >= boundaries[i]) & (grid < boundaries[i + 1])
+        if i == num_levels - 1:
+            mask = (grid >= boundaries[i]) & (grid <= boundaries[i + 1])
+        w = weights[mask]
+        if w.sum() > 0:
+            levels[i] = np.average(grid[mask], weights=w)
+        else:
+            levels[i] = (boundaries[i] + boundaries[i + 1]) / 2.0
+
+    for _ in range(max_iterations):
+        for i in range(1, num_levels):
+            boundaries[i] = (levels[i - 1] + levels[i]) / 2.0
+        for i in range(num_levels):
+            mask = (grid >= boundaries[i]) & (grid < boundaries[i + 1])
+            if i == num_levels - 1:
+                mask = (grid >= boundaries[i]) & (grid <= boundaries[i + 1])
+            w = weights[mask]
+            if w.sum() > 0:
+                levels[i] = np.average(grid[mask], weights=w)
+            else:
+                levels[i] = (boundaries[i] + boundaries[i + 1]) / 2.0
+
+    return boundaries, levels
+
+
+class CalibratedQuantizer(LloydMaxQuantizer):
+    """Lloyd-Max quantizer calibrated from empirical data.
+
+    Instead of the theoretical Beta distribution, fits codebooks to actual
+    post-rotation activation statistics collected from a calibration dataset.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        bits: int = 4,
+        device: torch.device | str = "cpu",
+        calibration_data: np.ndarray | None = None,
+        max_iterations: int = 300,
+        num_grid_points: int = 50000,
+    ):
+        if calibration_data is None:
+            super().__init__(dim, bits, device, max_iterations, num_grid_points)
+            return
+
+        self.dim = dim
+        self.bits = bits
+        self.num_levels = 1 << bits
+
+        boundaries_np, levels_np = compute_empirical_codebook(
+            calibration_data,
+            bits,
+            max_iterations,
+            num_grid_points,
+        )
+
+        self.boundaries = torch.tensor(boundaries_np, dtype=torch.float32, device=device)
+        self.levels = torch.tensor(levels_np, dtype=torch.float32, device=device)

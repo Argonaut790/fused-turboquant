@@ -9,16 +9,16 @@ Usage:
 import argparse
 import json
 import sys
-from pathlib import Path
 from dataclasses import asdict
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fused_turboquant.benchmark.runner import (
-    benchmark_rotation,
-    benchmark_quality,
-    print_results,
     BenchmarkSuite,
+    benchmark_quality,
+    benchmark_rotation,
+    print_results,
 )
 
 

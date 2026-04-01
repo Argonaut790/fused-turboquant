@@ -8,20 +8,21 @@ Memory bandwidth savings: ~4x (uint8 + small centroid table vs fp16 keys)
 
 Key math:
     <q, R^T @ centroids[idx]> = <R @ q, centroids[idx]>
-    
+
     So pre-rotate query once (one matmul), then the per-KV-position work
     is just: score[s] = norm[s] * sum_d(q_rot[d] * centroids[idx[s,d]]) / sqrt(d)
 """
 
+import math
+
 import torch
 import triton
 import triton.language as tl
-import math
-
 
 # ============================================================================
 # Triton kernel: fused gather-dot for quantized Q@K^T
 # ============================================================================
+
 
 @triton.autotune(
     configs=[
@@ -38,26 +39,31 @@ def _fused_qk_scores_kernel(
     # Pre-rotated query: [BH_q, head_dim]  (BH_q = batch * n_q_heads)
     Q_ptr,
     # Compressed keys
-    K_idx_ptr,    # [BH_kv, seq_len, head_dim] uint8
+    K_idx_ptr,  # [BH_kv, seq_len, head_dim] uint8
     K_norms_ptr,  # [BH_kv, seq_len] float16
     # Centroid table
-    C_ptr,        # [n_levels] float32
+    C_ptr,  # [n_levels] float32
     # Output scores
-    Out_ptr,      # [BH_q, seq_len] float32
+    Out_ptr,  # [BH_q, seq_len] float32
     # Dimensions
     seq_len,
     head_dim: tl.constexpr,
     n_q_heads,
     n_kv_heads,
-    scale,        # 1/sqrt(head_dim)
+    scale,  # 1/sqrt(head_dim)
     # Strides — Q: [BH_q, head_dim]
-    stride_q_bh, stride_q_d,
+    stride_q_bh,
+    stride_q_d,
     # Strides — K_idx: [BH_kv, seq_len, head_dim]
-    stride_ki_bh, stride_ki_s, stride_ki_d,
+    stride_ki_bh,
+    stride_ki_s,
+    stride_ki_d,
     # Strides — K_norms: [BH_kv, seq_len]
-    stride_kn_bh, stride_kn_s,
+    stride_kn_bh,
+    stride_kn_s,
     # Strides — Out: [BH_q, seq_len]
-    stride_o_bh, stride_o_s,
+    stride_o_bh,
+    stride_o_s,
     # Block sizes (autotuned)
     BLOCK_S: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -67,8 +73,8 @@ def _fused_qk_scores_kernel(
     For each (query_head, kv_block):
         score[s] = key_norm[s] * sum_d(q_rot[d] * centroids[key_idx[s, d]]) * scale
     """
-    pid_bh = tl.program_id(0)   # batch * query_head
-    pid_s = tl.program_id(1)    # seq block
+    pid_bh = tl.program_id(0)  # batch * query_head
+    pid_s = tl.program_id(1)  # seq block
 
     # GQA: map query head → KV head
     batch_idx = pid_bh // n_q_heads
@@ -93,10 +99,12 @@ def _fused_qk_scores_kernel(
         q_vals = tl.load(q_ptrs, mask=d_mask, other=0.0).to(tl.float32)
 
         # Load key indices: K_idx[kv_bh, s_offs, d_offs] → [BLOCK_S, BLOCK_D]
-        ki_ptrs = (K_idx_ptr
-                   + kv_bh * stride_ki_bh
-                   + s_offs[:, None] * stride_ki_s
-                   + d_offs[None, :] * stride_ki_d)
+        ki_ptrs = (
+            K_idx_ptr
+            + kv_bh * stride_ki_bh
+            + s_offs[:, None] * stride_ki_s
+            + d_offs[None, :] * stride_ki_d
+        )
         combined_mask = s_mask[:, None] & d_mask[None, :]
         k_idx = tl.load(ki_ptrs, mask=combined_mask, other=0).to(tl.int32)
 
@@ -122,12 +130,13 @@ def _fused_qk_scores_kernel(
 # Python wrapper
 # ============================================================================
 
+
 def fused_qk_scores(
-    q_rotated: torch.Tensor,     # [batch, n_q_heads, q_len, head_dim] — pre-rotated
-    key_indices: torch.Tensor,   # [batch, n_kv_heads, kv_len, head_dim] uint8
-    key_norms: torch.Tensor,     # [batch, n_kv_heads, kv_len] float16
-    centroids: torch.Tensor,     # [n_levels] float32
-    scale: float,                # 1/sqrt(head_dim)
+    q_rotated: torch.Tensor,  # [batch, n_q_heads, q_len, head_dim] — pre-rotated
+    key_indices: torch.Tensor,  # [batch, n_kv_heads, kv_len, head_dim] uint8
+    key_norms: torch.Tensor,  # [batch, n_kv_heads, kv_len] float16
+    centroids: torch.Tensor,  # [n_levels] float32
+    scale: float,  # 1/sqrt(head_dim)
 ) -> torch.Tensor:
     """Compute attention scores Q @ K^T using compressed keys.
 
@@ -153,8 +162,9 @@ def fused_qk_scores(
     centroids = centroids.contiguous().float()
 
     # Output: [batch * n_q_heads * q_len, kv_len]
-    out = torch.empty(batch * n_q_heads * q_len, kv_len,
-                      device=q_rotated.device, dtype=torch.float32)
+    out = torch.empty(
+        batch * n_q_heads * q_len, kv_len, device=q_rotated.device, dtype=torch.float32
+    )
 
     # For the kernel, we treat each query position as a separate "head"
     # But GQA mapping needs to account for q_len grouping
@@ -165,7 +175,8 @@ def fused_qk_scores(
 
     _fused_qk_scores_kernel[grid](
         q_flat,
-        ki_flat, kn_flat,
+        ki_flat,
+        kn_flat,
         centroids,
         out,
         kv_len,
@@ -174,13 +185,18 @@ def fused_qk_scores(
         n_kv_heads,
         scale,
         # Strides Q
-        q_flat.stride(0), q_flat.stride(1),
+        q_flat.stride(0),
+        q_flat.stride(1),
         # Strides K_idx
-        ki_flat.stride(0), ki_flat.stride(1), ki_flat.stride(2),
+        ki_flat.stride(0),
+        ki_flat.stride(1),
+        ki_flat.stride(2),
         # Strides K_norms
-        kn_flat.stride(0), kn_flat.stride(1),
+        kn_flat.stride(0),
+        kn_flat.stride(1),
         # Strides Out
-        out.stride(0), out.stride(1),
+        out.stride(0),
+        out.stride(1),
     )
 
     return out.reshape(batch, n_q_heads, q_len, kv_len)
@@ -190,9 +206,9 @@ def fused_qk_scores(
 # Self-test: verify Triton kernel matches PyTorch reference
 # ============================================================================
 
+
 def test_fused_kernel():
     """Compare fused Triton kernel against explicit dequantize + matmul."""
-    import sys
     from turboquant_core import TurboQuantMSE
 
     torch.manual_seed(42)
@@ -210,11 +226,11 @@ def test_fused_kernel():
 
     # Quantize K
     k_q = tq.quantize(k)
-    k_indices = k_q["idx"]       # uint8
-    k_norms = k_q["norms"]       # fp16
+    k_indices = k_q["idx"]  # uint8
+    k_norms = k_q["norms"]  # fp16
 
     # --- Reference: explicit dequantize + matmul ---
-    k_deq = tq.dequantize(k_q)   # [batch, n_kv, kv_len, head_dim]
+    k_deq = tq.dequantize(k_q)  # [batch, n_kv, kv_len, head_dim]
     # GQA expand
     gqa_ratio = n_q_heads // n_kv_heads
     k_expanded = k_deq.repeat_interleave(gqa_ratio, dim=1)
@@ -230,12 +246,13 @@ def test_fused_kernel():
     max_diff = (ref_scores - fused_scores).abs().max().item()
     mean_diff = (ref_scores - fused_scores).abs().mean().item()
     cos = torch.nn.functional.cosine_similarity(
-        ref_scores.flatten().unsqueeze(0),
-        fused_scores.flatten().unsqueeze(0)
+        ref_scores.flatten().unsqueeze(0), fused_scores.flatten().unsqueeze(0)
     ).item()
 
-    print(f"Fused kernel test (batch={batch}, q_heads={n_q_heads}, kv_heads={n_kv_heads}, "
-          f"q_len={q_len}, kv_len={kv_len}, d={head_dim}, bits={bits}):")
+    print(
+        f"Fused kernel test (batch={batch}, q_heads={n_q_heads}, kv_heads={n_kv_heads}, "
+        f"q_len={q_len}, kv_len={kv_len}, d={head_dim}, bits={bits}):"
+    )
     print(f"  Max diff:   {max_diff:.6f}")
     print(f"  Mean diff:  {mean_diff:.6f}")
     print(f"  Cosine sim: {cos:.6f}")
@@ -278,6 +295,7 @@ def benchmark_fused_vs_standard():
 
         # Benchmark standard
         import time
+
         n_runs = 100
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -296,8 +314,10 @@ def benchmark_fused_vs_standard():
         t_fused = (time.perf_counter() - t0) / n_runs * 1000
 
         speedup = t_std / t_fused
-        print(f"  kv_len={kv_len:5d}  standard={t_std:.3f}ms  fused={t_fused:.3f}ms  "
-              f"speedup={speedup:.2f}x")
+        print(
+            f"  kv_len={kv_len:5d}  standard={t_std:.3f}ms  fused={t_fused:.3f}ms  "
+            f"speedup={speedup:.2f}x"
+        )
 
 
 if __name__ == "__main__":
