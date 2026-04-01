@@ -108,9 +108,13 @@ if HAS_TRITON:
 
         grid = (n,)
         _rht_kernel[grid](
-            x_flat, signs, out,
+            x_flat,
+            signs,
+            out,
             x_flat.stride(0),
-            n, d, log2_d,
+            n,
+            d,
+            log2_d,
             INVERSE=inverse,
         )
 

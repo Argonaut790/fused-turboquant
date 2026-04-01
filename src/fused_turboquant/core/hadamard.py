@@ -45,7 +45,7 @@ def fwht(x: torch.Tensor) -> torch.Tensor:
         x = torch.stack([a + b, a - b], dim=-2)
         x = x.view(*leading, d)
         h *= 2
-    return x * (d ** -0.5)
+    return x * (d**-0.5)
 
 
 def inverse_fwht(x: torch.Tensor) -> torch.Tensor:
@@ -127,18 +127,21 @@ class RHTRotation(nn.Module):
 
     def _try_enable_triton(self) -> None:
         from fused_turboquant.kernels.triton_rht import is_triton_available
+
         if is_triton_available() and self.signs.is_cuda:
             self._use_triton = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._use_triton and x.is_cuda:
             from fused_turboquant.kernels.triton_rht import triton_rht
+
             return triton_rht(x, self.signs, inverse=False)
         return randomized_hadamard(x, self.signs)
 
     def inverse(self, y: torch.Tensor) -> torch.Tensor:
         if self._use_triton and y.is_cuda:
             from fused_turboquant.kernels.triton_rht import triton_rht
+
             return triton_rht(y, self.signs, inverse=True)
         return inverse_randomized_hadamard(y, self.signs)
 

@@ -78,7 +78,7 @@ if HAS_TRITON:
         # --- Compute norm (cross-thread reduction, stays in registers after) ---
         norm_sq = tl.sum(rotated * rotated, axis=0)
         norm = tl.sqrt(norm_sq + 1e-16)
-        tl.store(norms_out_ptr + pid, norm)
+        tl.store(norms_out_ptr + pid, norm.to(tl.float16))
 
         # --- Normalize ---
         normalized = rotated / (norm + 1e-8)
@@ -183,15 +183,25 @@ if HAS_TRITON:
             packed_dim = d
 
         packed_out = torch.empty((n, packed_dim), dtype=torch.uint8, device=x.device)
-        norms_out = torch.empty(n, dtype=torch.float32, device=x.device)
+        norms_out = torch.empty(n, dtype=torch.float16, device=x.device)
         scratch = torch.empty_like(x_flat)
 
         grid = (n,)
         _fused_encode_kernel[grid](
-            x_flat, signs, boundaries,
-            packed_out, norms_out, scratch,
-            x_flat.stride(0), packed_out.stride(0),
-            n, d, log2_d, bits, n_levels, n_boundaries,
+            x_flat,
+            signs,
+            boundaries,
+            packed_out,
+            norms_out,
+            scratch,
+            x_flat.stride(0),
+            packed_out.stride(0),
+            n,
+            d,
+            log2_d,
+            bits,
+            n_levels,
+            n_boundaries,
         )
 
         norms_shape = list(original_shape[:-1])

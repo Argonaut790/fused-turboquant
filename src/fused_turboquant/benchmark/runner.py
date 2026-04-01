@@ -84,33 +84,42 @@ def benchmark_rotation(
     dense = DenseQRRotation(dim, device=device)
 
     t_rht = _time_fn(lambda: rht(x))
-    results.append(RotationBenchResult(
-        method="RHT (PyTorch batched)",
-        dim=dim, batch_size=batch_size,
-        time_ms=t_rht,
-        throughput_gops=batch_size * dim * (1 + dim.bit_length()) / t_rht / 1e6,
-        memory_bytes=dim * 4,
-    ))
+    results.append(
+        RotationBenchResult(
+            method="RHT (PyTorch batched)",
+            dim=dim,
+            batch_size=batch_size,
+            time_ms=t_rht,
+            throughput_gops=batch_size * dim * (1 + dim.bit_length()) / t_rht / 1e6,
+            memory_bytes=dim * 4,
+        )
+    )
 
     t_dense = _time_fn(lambda: dense(x))
-    results.append(RotationBenchResult(
-        method="Dense QR (matmul)",
-        dim=dim, batch_size=batch_size,
-        time_ms=t_dense,
-        throughput_gops=batch_size * dim * dim / t_dense / 1e6,
-        memory_bytes=dim * dim * 4,
-    ))
+    results.append(
+        RotationBenchResult(
+            method="Dense QR (matmul)",
+            dim=dim,
+            batch_size=batch_size,
+            time_ms=t_dense,
+            throughput_gops=batch_size * dim * dim / t_dense / 1e6,
+            memory_bytes=dim * dim * 4,
+        )
+    )
 
     if is_triton_available():
         signs = rht.signs
         t_triton = _time_fn(lambda: triton_rht(x, signs))
-        results.append(RotationBenchResult(
-            method="RHT (Triton fused)",
-            dim=dim, batch_size=batch_size,
-            time_ms=t_triton,
-            throughput_gops=batch_size * dim * (1 + dim.bit_length()) / t_triton / 1e6,
-            memory_bytes=dim * 4,
-        ))
+        results.append(
+            RotationBenchResult(
+                method="RHT (Triton fused)",
+                dim=dim,
+                batch_size=batch_size,
+                time_ms=t_triton,
+                throughput_gops=batch_size * dim * (1 + dim.bit_length()) / t_triton / 1e6,
+                memory_bytes=dim * 4,
+            )
+        )
 
     return results
 
@@ -139,16 +148,21 @@ def benchmark_quality(
         xhat_norm = x_hat / (torch.norm(x_hat, dim=-1, keepdim=True) + 1e-8)
         cosine_sim = torch.mean(torch.sum(x_norm * xhat_norm, dim=-1)).item()
 
-        ip_original = torch.sum(x[:num_vectors // 2] * x[num_vectors // 2:], dim=-1)
-        ip_quantized = torch.sum(x_hat[:num_vectors // 2] * x_hat[num_vectors // 2:], dim=-1)
+        ip_original = torch.sum(x[: num_vectors // 2] * x[num_vectors // 2 :], dim=-1)
+        ip_quantized = torch.sum(x_hat[: num_vectors // 2] * x_hat[num_vectors // 2 :], dim=-1)
         ip_corr = torch.corrcoef(torch.stack([ip_original, ip_quantized]))[0, 1].item()
 
-        results.append(QualityResult(
-            bits=bits, dim=dim, num_vectors=num_vectors,
-            mse=mse, cosine_similarity=cosine_sim,
-            inner_product_correlation=ip_corr,
-            compression_ratio=compressed.compression_ratio,
-        ))
+        results.append(
+            QualityResult(
+                bits=bits,
+                dim=dim,
+                num_vectors=num_vectors,
+                mse=mse,
+                cosine_similarity=cosine_sim,
+                inner_product_correlation=ip_corr,
+                compression_ratio=compressed.compression_ratio,
+            )
+        )
 
     return results
 
@@ -161,13 +175,9 @@ def run_full_benchmark(
     suite = BenchmarkSuite()
 
     for batch in [256, 1024, 4096, 16384]:
-        suite.rotation_results.extend(
-            benchmark_rotation(dim=dim, batch_size=batch, device=device)
-        )
+        suite.rotation_results.extend(benchmark_rotation(dim=dim, batch_size=batch, device=device))
 
-    suite.quality_results.extend(
-        benchmark_quality(dim=dim, num_vectors=2048, device=device)
-    )
+    suite.quality_results.extend(benchmark_quality(dim=dim, num_vectors=2048, device=device))
 
     return suite
 

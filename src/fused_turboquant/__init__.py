@@ -1,6 +1,6 @@
 """Fused TurboQuant: KV cache compression with fused Triton kernels powered by RHT."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from fused_turboquant.core.hadamard import (
     fwht,
@@ -8,7 +8,7 @@ from fused_turboquant.core.hadamard import (
     inverse_randomized_hadamard,
     randomized_hadamard,
 )
-from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
+from fused_turboquant.core.lloyd_max import CalibratedQuantizer, LloydMaxQuantizer
 from fused_turboquant.core.quantizer import TurboQuantMSE
 
 __all__ = [
@@ -17,5 +17,6 @@ __all__ = [
     "randomized_hadamard",
     "inverse_randomized_hadamard",
     "LloydMaxQuantizer",
+    "CalibratedQuantizer",
     "TurboQuantMSE",
 ]

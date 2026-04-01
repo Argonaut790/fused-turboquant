@@ -83,20 +83,15 @@ def _probe_attention_module(module, config) -> dict:
     loudly rather than producing silent garbage.
     """
     return {
-        "has_separate_qkv": all(
-            hasattr(module, p) for p in ("q_proj", "k_proj", "v_proj")
-        ),
+        "has_separate_qkv": all(hasattr(module, p) for p in ("q_proj", "k_proj", "v_proj")),
         "has_fused_qkv": hasattr(module, "qkv_proj") or hasattr(module, "c_attn"),
         "output_proj": _find_output_proj(module),
         "is_cross_attention": getattr(module, "is_cross_attention", False),
         "sliding_window": (
-            getattr(module, "sliding_window", None)
-            or getattr(config, "sliding_window", None)
+            getattr(module, "sliding_window", None) or getattr(config, "sliding_window", None)
         ),
         "has_qk_norm": hasattr(module, "q_norm") or hasattr(module, "k_norm"),
-        "attn_logit_softcapping": getattr(
-            module, "attn_logit_softcapping", None
-        ),
+        "attn_logit_softcapping": getattr(module, "attn_logit_softcapping", None),
         "rope_expected": _config_uses_rope(config),
     }
 
@@ -109,6 +104,8 @@ class CompressedKVCache(DynamicCache):
     attention kernel unpacks key indices inline via shift+mask (no separate
     dequantization pass). Values are decompressed in bulk before the matmul.
 
+    Supports per-layer quantizers for adaptive mixed-precision (AdaptiveBits).
+
     A minimal dummy tensor is passed to DynamicCache.update() so that
     transformers' internal bookkeeping (get_seq_length, etc.) stays correct.
     """
@@ -116,9 +113,18 @@ class CompressedKVCache(DynamicCache):
     def __init__(self, quantizer: TurboQuantMSE, compress_v: bool = True):
         super().__init__()
         self.tq = quantizer
+        self._layer_tq: dict[int, TurboQuantMSE] = {}
         self.compress_v = compress_v
         self._compressed_keys: list[Optional[dict]] = []
         self._compressed_values: list[Optional[dict]] = []
+
+    def set_layer_quantizer(self, layer_idx: int, tq: TurboQuantMSE) -> None:
+        """Register a per-layer quantizer for adaptive mixed-precision."""
+        self._layer_tq[layer_idx] = tq
+
+    def get_layer_quantizer(self, layer_idx: int) -> TurboQuantMSE:
+        """Get the quantizer for a layer, falling back to the default."""
+        return self._layer_tq.get(layer_idx, self.tq)
 
     # -- Key compression (packed uint8, unpacked inline by fused kernel) ------
 
@@ -131,7 +137,8 @@ class CompressedKVCache(DynamicCache):
         while len(self._compressed_keys) <= layer_idx:
             self._compressed_keys.append(None)
 
-        compressed = self.tq.encode(key_states.float())
+        tq = self.get_layer_quantizer(layer_idx)
+        compressed = tq.encode(key_states.float())
 
         packed_shape = list(key_states.shape[:-1]) + [compressed.indices.shape[-1]]
         packed_indices = compressed.indices.view(packed_shape)
@@ -145,7 +152,8 @@ class CompressedKVCache(DynamicCache):
             prev = self._compressed_keys[layer_idx]
             self._compressed_keys[layer_idx] = {
                 "packed_indices": torch.cat(
-                    [prev["packed_indices"], entry["packed_indices"]], dim=2,
+                    [prev["packed_indices"], entry["packed_indices"]],
+                    dim=2,
                 ),
                 "norms": torch.cat([prev["norms"], entry["norms"]], dim=2),
             }
@@ -162,7 +170,8 @@ class CompressedKVCache(DynamicCache):
         while len(self._compressed_values) <= layer_idx:
             self._compressed_values.append(None)
 
-        compressed = self.tq.encode(value_states.float())
+        tq = self.get_layer_quantizer(layer_idx)
+        compressed = tq.encode(value_states.float())
 
         packed_shape = list(value_states.shape[:-1]) + [compressed.indices.shape[-1]]
         packed_indices = compressed.indices.view(packed_shape)
@@ -176,7 +185,8 @@ class CompressedKVCache(DynamicCache):
             prev = self._compressed_values[layer_idx]
             self._compressed_values[layer_idx] = {
                 "packed_indices": torch.cat(
-                    [prev["packed_indices"], entry["packed_indices"]], dim=2,
+                    [prev["packed_indices"], entry["packed_indices"]],
+                    dim=2,
                 ),
                 "norms": torch.cat([prev["norms"], entry["norms"]], dim=2),
             }
@@ -191,14 +201,15 @@ class CompressedKVCache(DynamicCache):
 
         Returns tensor of shape [batch, n_kv_heads, kv_len, head_dim] in float32.
         """
+        tq = self.get_layer_quantizer(layer_idx)
         entry = self._compressed_values[layer_idx]
         ct = CompressedTensor(
             indices=entry["packed_indices"],
             norms=entry["norms"],
-            original_dim=self.tq.head_dim,
-            bits=self.tq.bits,
+            original_dim=tq.head_dim,
+            bits=tq.bits,
         )
-        return self.tq.decode(ct)
+        return tq.decode(ct)
 
     # -- Reset ----------------------------------------------------------------
 
@@ -221,7 +232,7 @@ def _apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
     def rotate_half(x):
         x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2:]
+        x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -234,9 +245,7 @@ def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return hidden_states
     batch, n_kv_heads, slen, head_dim = hidden_states.shape
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, n_kv_heads, n_rep, slen, head_dim
-    )
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, n_kv_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, n_kv_heads * n_rep, slen, head_dim)
 
 
@@ -265,9 +274,7 @@ def make_fused_attention_forward(
             )
 
         if probe["has_fused_qkv"] and not probe["has_separate_qkv"]:
-            fused_name = (
-                "qkv_proj" if hasattr(attn_module, "qkv_proj") else "c_attn"
-            )
+            fused_name = "qkv_proj" if hasattr(attn_module, "qkv_proj") else "c_attn"
             raise ValueError(
                 f"Layer {layer_idx}: fused QKV projection ({fused_name}) is not "
                 f"supported. fused-turboquant requires separate q_proj, k_proj, "
@@ -275,10 +282,12 @@ def make_fused_attention_forward(
             )
 
         if probe["sliding_window"] is not None:
-            raise ValueError(
-                f"Layer {layer_idx}: sliding window attention "
-                f"(window={probe['sliding_window']}) is not yet supported. "
-                f"fused-turboquant currently supports full causal attention only."
+            logger.info(
+                "Layer %d: sliding window attention (window=%s) detected. "
+                "fused-turboquant will compress the full KV cache and apply "
+                "the window mask during attention computation.",
+                layer_idx,
+                probe["sliding_window"],
             )
 
         if probe["attn_logit_softcapping"] is not None:
@@ -312,6 +321,11 @@ def make_fused_attention_forward(
         n_kv_heads = attn_module.k_proj.out_features // head_dim
     n_kv_groups = n_heads // n_kv_heads
 
+    sliding_window = getattr(attn_module, "sliding_window", None) or (
+        getattr(config, "sliding_window", None) if config else None
+    )
+    n_sink_tokens = getattr(config, "sink_tokens", 4) if config else 4
+
     q_norm = getattr(attn_module, "q_norm", None)
     k_norm = getattr(attn_module, "k_norm", None)
 
@@ -341,7 +355,10 @@ def make_fused_attention_forward(
         if position_embeddings is not None:
             cos, sin = position_embeddings
             query_states, key_states = _apply_rotary_pos_emb(
-                query_states, key_states, cos, sin,
+                query_states,
+                key_states,
+                cos,
+                sin,
             )
 
         cache.store_compressed_key(key_states, layer_idx)
@@ -362,6 +379,7 @@ def make_fused_attention_forward(
             compressed = cache.get_compressed_key(layer_idx)
 
             from fused_turboquant.core.hadamard import randomized_hadamard
+
             q_flat = query_states.float().reshape(-1, head_dim)
             q_rot = randomized_hadamard(q_flat, rht_signs)
             q_rot = q_rot.view_as(query_states)
@@ -383,8 +401,23 @@ def make_fused_attention_forward(
                 elif attention_mask.dim() == 2:
                     attn_weights = attn_weights + attention_mask[:1, :kv_len]
 
+            if sliding_window is not None and kv_len > sliding_window:
+                window_mask = torch.full(
+                    (1, 1, 1, kv_len),
+                    float("-inf"),
+                    device=attn_weights.device,
+                    dtype=attn_weights.dtype,
+                )
+                window_start = max(0, kv_len - sliding_window)
+                window_mask[:, :, :, window_start:] = 0
+                if n_sink_tokens > 0:
+                    window_mask[:, :, :, :n_sink_tokens] = 0
+                attn_weights = attn_weights + window_mask
+
             attn_weights = torch.nn.functional.softmax(
-                attn_weights, dim=-1, dtype=torch.float32,
+                attn_weights,
+                dim=-1,
+                dtype=torch.float32,
             ).to(query_states.dtype)
 
             if compress_v:
@@ -517,9 +550,7 @@ def check_model_compatibility(model) -> dict:
 
         name_lower = _name.lower()
         if any(kw in name_lower for kw in _SKIP_NAME_KEYWORDS):
-            has_qkv = all(
-                hasattr(module, p) for p in ("q_proj", "k_proj", "v_proj")
-            )
+            has_qkv = all(hasattr(module, p) for p in ("q_proj", "k_proj", "v_proj"))
             if has_qkv:
                 vision_layers_skipped += 1
             continue
@@ -530,8 +561,6 @@ def check_model_compatibility(model) -> dict:
 
         if _is_full_attention_layer(module, _name):
             probe = _probe_attention_module(module, config)
-            if probe["sliding_window"] is not None and "sliding_window" not in unsupported:
-                unsupported.append("sliding_window")
             has_softcap = probe["attn_logit_softcapping"] is not None
             if has_softcap and "logit_softcapping" not in unsupported:
                 unsupported.append("logit_softcapping")
@@ -542,9 +571,7 @@ def check_model_compatibility(model) -> dict:
     if head_dim == 0:
         issues.append("Could not detect head_dim from model config")
     elif not is_power_of_2:
-        issues.append(
-            f"head_dim={head_dim} is not a power of 2 — RHT requires 64, 128, 256, etc."
-        )
+        issues.append(f"head_dim={head_dim} is not a power of 2 — RHT requires 64, 128, 256, etc.")
 
     if n_kv_heads > 0 and n_q_heads % n_kv_heads != 0:
         issues.append(
@@ -577,12 +604,7 @@ def check_model_compatibility(model) -> dict:
             f"These would cause incorrect results."
         )
 
-    compatible = (
-        is_power_of_2
-        and eligible > 0
-        and len(issues) == 0
-        and len(unsupported) == 0
-    )
+    compatible = is_power_of_2 and eligible > 0 and len(issues) == 0 and len(unsupported) == 0
 
     return {
         "compatible": compatible,
@@ -665,7 +687,8 @@ def _smoke_test(
                 module.forward = fused_forwards[name]
 
     cos_sim = torch.nn.functional.cosine_similarity(
-        fused_logits.unsqueeze(0), ref_logits.unsqueeze(0),
+        fused_logits.unsqueeze(0),
+        ref_logits.unsqueeze(0),
     ).item()
 
     if cos_sim < 0.8:
@@ -679,7 +702,8 @@ def _smoke_test(
         )
 
     logger.info(
-        "Smoke test passed: logit cosine similarity = %.4f", cos_sim,
+        "Smoke test passed: logit cosine similarity = %.4f",
+        cos_sim,
     )
 
 
@@ -707,6 +731,13 @@ def patch_model(
     head_dim: int | None = None,
     verify: bool = True,
     compress_v: bool | str = True,
+    max_iterations: int = 300,
+    num_grid_points: int = 50000,
+    strategy: str | None = None,
+    target_compression: float | None = None,
+    quality_target: float | None = None,
+    tokenizer=None,
+    calibration_text: str | None = None,
 ) -> CompressedKVCache:
     """Patch all full-attention layers in a model to use fused TurboQuant.
 
@@ -715,7 +746,7 @@ def patch_model(
 
     Args:
         model: A HuggingFace CausalLM model.
-        bits: Quantization bit-width (2, 3, or 4).
+        bits: Quantization bit-width (2, 3, or 4). Ignored when strategy="adaptive".
         head_dim: Override head dimension. Auto-detected from config if None.
         verify: Run a single-token smoke test after patching to catch silent
             correctness bugs. Set to False to skip (e.g., for benchmarking).
@@ -724,6 +755,14 @@ def patch_model(
             - False: no V compression (K-only)
             - "boundary": keep first 2 + last 2 layers at fp16 V, compress rest
             - callable(layer_idx, n_layers) -> bool: custom per-layer strategy
+        max_iterations: Lloyd-Max codebook iterations.
+        num_grid_points: Lloyd-Max grid density.
+        strategy: "adaptive" to auto-assign per-layer bit-rates via calibration.
+            When set, `bits` is used as the default/fallback.
+        target_compression: (adaptive only) target average KV compression ratio.
+        quality_target: (adaptive only) target mean cosine similarity (0-1).
+        tokenizer: (adaptive only) tokenizer for calibration text.
+        calibration_text: (adaptive only) custom calibration text.
 
     Returns a CompressedKVCache to pass as past_key_values to model.generate().
     """
@@ -761,15 +800,44 @@ def patch_model(
         )
 
     device = next(model.parameters()).device
-    tq = TurboQuantMSE(head_dim=head_dim, bits=bits, device=str(device))
-    any_v = not isinstance(compress_v, bool) or compress_v
-    cache = CompressedKVCache(tq, compress_v=any_v)
 
     eligible_names = [
-        name for name, module in model.named_modules()
-        if _is_full_attention_layer(module, name)
+        name for name, module in model.named_modules() if _is_full_attention_layer(module, name)
     ]
     n_layers = len(eligible_names)
+
+    bit_map: dict[int, int] | None = None
+    if strategy == "adaptive":
+        from fused_turboquant.core.adaptive import calibrate_layer_bits
+
+        cal_kwargs: dict = {"head_dim": head_dim}
+        if tokenizer is not None:
+            cal_kwargs["tokenizer"] = tokenizer
+        if calibration_text is not None:
+            cal_kwargs["calibration_text"] = calibration_text
+        if target_compression is not None:
+            cal_kwargs["target_compression"] = target_compression
+        elif quality_target is not None:
+            cal_kwargs["quality_target"] = quality_target
+        bit_map = calibrate_layer_bits(model, **cal_kwargs)
+
+    default_bits = bits
+    tq_cache: dict[int, TurboQuantMSE] = {}
+
+    def get_tq(b: int) -> TurboQuantMSE:
+        if b not in tq_cache:
+            tq_cache[b] = TurboQuantMSE(
+                head_dim=head_dim,
+                bits=b,
+                device=str(device),
+                max_iterations=max_iterations,
+                num_grid_points=num_grid_points,
+            )
+        return tq_cache[b]
+
+    primary_tq = get_tq(default_bits)
+    any_v = not isinstance(compress_v, bool) or compress_v
+    cache = CompressedKVCache(primary_tq, compress_v=any_v)
 
     patched = 0
     layer_idx = 0
@@ -778,12 +846,18 @@ def patch_model(
 
     for name, module in model.named_modules():
         if _is_full_attention_layer(module, name):
+            layer_bits = bit_map[layer_idx] if bit_map else default_bits
+            layer_tq = get_tq(layer_bits)
             layer_compress_v = _resolve_compress_v(compress_v, layer_idx, n_layers)
             if layer_compress_v:
                 v_compressed_count += 1
             originals[name] = module.forward
             module.forward = make_fused_attention_forward(
-                module, cache, tq, layer_idx, config=config,
+                module,
+                cache,
+                layer_tq,
+                layer_idx,
+                config=config,
                 compress_v=layer_compress_v,
             )
             patched += 1
@@ -814,7 +888,9 @@ def patch_model(
             kv_mode = f"K+V({v_compressed_count}/{patched} layers)"
         logger.info(
             "Patched %d attention layers with fused TurboQuant (%d-bit, %s compression)",
-            patched, bits, kv_mode,
+            patched,
+            bits,
+            kv_mode,
         )
 
         if verify:

@@ -12,20 +12,18 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import sys
 import time
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import torch
-import numpy as np
 
-from fused_turboquant.core.hadamard import RHTRotation, DenseQRRotation
+from fused_turboquant.core.hadamard import DenseQRRotation, RHTRotation
 from fused_turboquant.core.quantizer import TurboQuantMSE
 from fused_turboquant.kernels.triton_rht import is_triton_available
-
 
 QWEN35_FULL_ATTN_LAYERS = 8
 QWEN35_NUM_KV_HEADS = 4
@@ -55,11 +53,11 @@ def fmt_bytes(b: float) -> str:
     if b < 1024:
         return f"{b:.0f} B"
     elif b < 1024**2:
-        return f"{b/1024:.1f} KB"
+        return f"{b / 1024:.1f} KB"
     elif b < 1024**3:
-        return f"{b/1024**2:.1f} MB"
+        return f"{b / 1024**2:.1f} MB"
     else:
-        return f"{b/1024**3:.2f} GB"
+        return f"{b / 1024**3:.2f} GB"
 
 
 # ===========================================================================
@@ -82,8 +80,10 @@ def bench_scaling(device: str):
         f"{'Speedup':>8} | {'RHT mem':>10} | {'QR mem':>10} | {'mem ratio':>10}"
     )
     print(header)
-    print(f"  {'------':>6}-+-{'-------':>7}-+-{'----------':>10}-+-{'-------------':>13}-+-"
-          f"{'--------':>8}-+-{'----------':>10}-+-{'----------':>10}-+-{'----------':>10}")
+    print(
+        f"  {'------':>6}-+-{'-------':>7}-+-{'----------':>10}-+-{'-------------':>13}-+-"
+        f"{'--------':>8}-+-{'----------':>10}-+-{'----------':>10}-+-{'----------':>10}"
+    )
 
     for dim in [64, 128, 256, 512, 1024, 2048]:
         rht = RHTRotation(dim, device=device)
@@ -102,7 +102,7 @@ def bench_scaling(device: str):
         winner = "<-- RHT wins" if speedup > 1.0 else ""
 
         print(
-            f"  {dim:>6} | {dim.bit_length()-1:>7} | {t_rht:>10.3f} | {t_dense:>13.3f} | "
+            f"  {dim:>6} | {dim.bit_length() - 1:>7} | {t_rht:>10.3f} | {t_dense:>13.3f} | "
             f"{speedup:>7.2f}x | {fmt_bytes(rht_mem):>10} | {fmt_bytes(dense_mem):>10} | "
             f"{mem_ratio:>9.0f}x {winner}"
         )
@@ -134,8 +134,6 @@ def bench_fused_attention(device: str):
         return
 
     from fused_turboquant.kernels.triton_attention import fused_qk_scores_rht
-    from fused_turboquant.kernels.triton_rht import triton_rht
-    from fused_turboquant.core.hadamard import generate_rht_signs
 
     dim = QWEN35_HEAD_DIM
     batch = 1
@@ -148,7 +146,9 @@ def bench_fused_attention(device: str):
     tq = TurboQuantMSE(head_dim=dim, bits=bits, device=device)
 
     # --- Correctness Test ---
-    print(f"\n  Correctness test: batch={batch}, q_heads={n_q_heads}, kv_heads={n_kv_heads}, d={dim}")
+    print(
+        f"\n  Correctness test: batch={batch}, q_heads={n_q_heads}, kv_heads={n_kv_heads}, d={dim}"
+    )
 
     kv_len = 512
     q = torch.randn(batch, n_q_heads, 1, dim, device=device, dtype=torch.float32)
@@ -163,12 +163,17 @@ def bench_fused_attention(device: str):
 
     # Fused: pre-rotate query with RHT, then kernel reads uint8 indices
     from fused_turboquant.core.packing import unpack_nibbles
+
     key_indices = unpack_nibbles(compressed.indices, compressed.original_dim)
     key_norms = compressed.norms
 
     q_rot = tq.rotation(q)
     fused_scores = fused_qk_scores_rht(
-        q_rot, key_indices, key_norms, tq.quantizer.levels, scale,
+        q_rot,
+        key_indices,
+        key_norms,
+        tq.quantizer.levels,
+        scale,
     )
 
     cos = torch.nn.functional.cosine_similarity(
@@ -183,8 +188,12 @@ def bench_fused_attention(device: str):
     # --- Latency Benchmark ---
     print(f"\n  Latency benchmark: 1 query decoding step, {bits}-bit keys")
     print()
-    print(f"  {'KV Len':>8} | {'Standard (ms)':>14} | {'Fused (ms)':>12} | {'Speedup':>8} | {'BW saved':>9}")
-    print(f"  {'--------':>8}-+-{'--------------':>14}-+-{'------------':>12}-+-{'--------':>8}-+-{'---------':>9}")
+    print(
+        f"  {'KV Len':>8} | {'Standard (ms)':>14} | {'Fused (ms)':>12} | {'Speedup':>8} | {'BW saved':>9}"
+    )
+    print(
+        f"  {'--------':>8}-+-{'--------------':>14}-+-{'------------':>12}-+-{'--------':>8}-+-{'---------':>9}"
+    )
 
     for kv_len in [128, 512, 1024, 2048, 4096, 8192]:
         q = torch.randn(batch, n_q_heads, 1, dim, device=device, dtype=torch.float32)
@@ -234,9 +243,9 @@ def bench_multi_batch():
     num_kv_heads = QWEN35_NUM_KV_HEADS
     num_attn_layers = QWEN35_FULL_ATTN_LAYERS
 
-    model_weight_bytes = 5 * 1024**3   # AWQ 4-bit ~5GB
-    overhead_bytes = 1.5 * 1024**3     # activations, etc
-    total_vram = 16 * 1024**3          # RTX 5070 Ti
+    model_weight_bytes = 5 * 1024**3  # AWQ 4-bit ~5GB
+    overhead_bytes = 1.5 * 1024**3  # activations, etc
+    total_vram = 16 * 1024**3  # RTX 5070 Ti
     available = total_vram - model_weight_bytes - overhead_bytes
 
     fp16_per_token = num_kv_heads * head_dim * 2 * 2 * num_attn_layers  # K+V, fp16
@@ -249,12 +258,20 @@ def bench_multi_batch():
     tq2_norms_per_token = num_kv_heads * 2 * 4
     tq2_per_token = (tq2_indices_per_token + tq2_norms_per_token) * num_attn_layers
 
-    print(f"\n  RTX 5070 Ti: {total_vram/1024**3:.0f} GB total, ~{available/1024**3:.1f} GB for KV cache")
-    print(f"  Per-token KV: FP16={fp16_per_token} B, TQ4={tq4_per_token:.0f} B, TQ2={tq2_per_token:.0f} B")
+    print(
+        f"\n  RTX 5070 Ti: {total_vram / 1024**3:.0f} GB total, ~{available / 1024**3:.1f} GB for KV cache"
+    )
+    print(
+        f"  Per-token KV: FP16={fp16_per_token} B, TQ4={tq4_per_token:.0f} B, TQ2={tq2_per_token:.0f} B"
+    )
     print()
 
-    print(f"  {'Context':>10} | {'FP16 users':>11} | {'TQ4 users':>10} | {'TQ2 users':>10} | {'TQ4 gain':>9} | {'TQ2 gain':>9}")
-    print(f"  {'----------':>10}-+-{'-----------':>11}-+-{'----------':>10}-+-{'----------':>10}-+-{'---------':>9}-+-{'---------':>9}")
+    print(
+        f"  {'Context':>10} | {'FP16 users':>11} | {'TQ4 users':>10} | {'TQ2 users':>10} | {'TQ4 gain':>9} | {'TQ2 gain':>9}"
+    )
+    print(
+        f"  {'----------':>10}-+-{'-----------':>11}-+-{'----------':>10}-+-{'----------':>10}-+-{'---------':>9}-+-{'---------':>9}"
+    )
 
     for ctx in [1024, 2048, 4096, 8192, 16384, 32768, 65536]:
         fp16_per_user = fp16_per_token * ctx
@@ -298,16 +315,24 @@ def bench_perplexity(device: str):
     batch = 1
     scale = 1.0 / math.sqrt(dim)
 
-    print(f"\n  Simulating {num_layers}-layer attention: batch={batch}, seq={seq_len}, "
-          f"q_heads={n_q_heads}, kv_heads={n_kv_heads}, d={dim}")
+    print(
+        f"\n  Simulating {num_layers}-layer attention: batch={batch}, seq={seq_len}, "
+        f"q_heads={n_q_heads}, kv_heads={n_kv_heads}, d={dim}"
+    )
     print()
 
     torch.manual_seed(42)
-    queries = [torch.randn(batch, n_q_heads, seq_len, dim, device=device) for _ in range(num_layers)]
+    queries = [
+        torch.randn(batch, n_q_heads, seq_len, dim, device=device) for _ in range(num_layers)
+    ]
     keys = [torch.randn(batch, n_kv_heads, seq_len, dim, device=device) for _ in range(num_layers)]
-    values = [torch.randn(batch, n_kv_heads, seq_len, dim, device=device) for _ in range(num_layers)]
+    values = [
+        torch.randn(batch, n_kv_heads, seq_len, dim, device=device) for _ in range(num_layers)
+    ]
 
-    causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device) * float('-inf'), diagonal=1)
+    causal_mask = torch.triu(
+        torch.ones(seq_len, seq_len, device=device) * float("-inf"), diagonal=1
+    )
 
     def run_attention(q_list, k_list, v_list):
         outputs = []
@@ -323,10 +348,14 @@ def bench_perplexity(device: str):
     # FP32 baseline
     fp32_outputs = run_attention(queries, keys, values)
 
-    print(f"  {'Bits':>4} | {'Compress':>8} | {'Output CosSim':>14} | {'Output MSE':>11} | "
-          f"{'Attn KL (avg)':>14} | {'Status':>8}")
-    print(f"  {'----':>4}-+-{'--------':>8}-+-{'--------------':>14}-+-{'-----------':>11}-+-"
-          f"{'--------------':>14}-+-{'--------':>8}")
+    print(
+        f"  {'Bits':>4} | {'Compress':>8} | {'Output CosSim':>14} | {'Output MSE':>11} | "
+        f"{'Attn KL (avg)':>14} | {'Status':>8}"
+    )
+    print(
+        f"  {'----':>4}-+-{'--------':>8}-+-{'--------------':>14}-+-{'-----------':>11}-+-"
+        f"{'--------------':>14}-+-{'--------':>8}"
+    )
 
     for bits in [4, 3, 2]:
         tq_k = TurboQuantMSE(head_dim=dim, bits=bits, seed=42, device=device)
@@ -357,7 +386,9 @@ def bench_perplexity(device: str):
             probs_fp = torch.softmax(scores_fp, dim=-1)
             probs_q = torch.softmax(scores_q, dim=-1)
             kl = torch.mean(
-                torch.sum(probs_fp * (torch.log(probs_fp + 1e-10) - torch.log(probs_q + 1e-10)), dim=-1)
+                torch.sum(
+                    probs_fp * (torch.log(probs_fp + 1e-10) - torch.log(probs_q + 1e-10)), dim=-1
+                )
             ).item()
             total_kl += kl
 
@@ -378,7 +409,9 @@ def bench_perplexity(device: str):
     print("  Interpretation:")
     print("  - 4-bit: Output cosine sim >0.99, attention KL <0.01 -> production-ready")
     print("  - 3-bit: Slight degradation, acceptable for most tasks")
-    print("  - 2-bit: Noticeable quality loss, suitable for draft decoding or long-context retrieval")
+    print(
+        "  - 2-bit: Noticeable quality loss, suitable for draft decoding or long-context retrieval"
+    )
 
 
 # ===========================================================================
@@ -396,8 +429,12 @@ def bench_quality_vs_seqlen(device: str):
 
     print(f"\n  4-bit TurboQuant, dim={dim}")
     print()
-    print(f"  {'Seq Len':>10} | {'Cosine Sim':>11} | {'MSE':>11} | {'IP Corr':>9} | {'Compress':>9}")
-    print(f"  {'----------':>10}-+-{'-----------':>11}-+-{'-----------':>11}-+-{'---------':>9}-+-{'---------':>9}")
+    print(
+        f"  {'Seq Len':>10} | {'Cosine Sim':>11} | {'MSE':>11} | {'IP Corr':>9} | {'Compress':>9}"
+    )
+    print(
+        f"  {'----------':>10}-+-{'-----------':>11}-+-{'-----------':>11}-+-{'---------':>9}-+-{'---------':>9}"
+    )
 
     for n in [64, 256, 1024, 4096, 16384, 65536]:
         torch.manual_seed(42)
@@ -411,8 +448,8 @@ def bench_quality_vs_seqlen(device: str):
 
         half = n // 2
         if half > 0:
-            ip_a = torch.sum(x[:half] * x[half:2*half], dim=-1)
-            ip_b = torch.sum(x_hat[:half] * x_hat[half:2*half], dim=-1)
+            ip_a = torch.sum(x[:half] * x[half : 2 * half], dim=-1)
+            ip_b = torch.sum(x_hat[:half] * x_hat[half : 2 * half], dim=-1)
             ipc = torch.corrcoef(torch.stack([ip_a, ip_b]))[0, 1].item()
         else:
             ipc = float("nan")
@@ -420,9 +457,7 @@ def bench_quality_vs_seqlen(device: str):
         compressed = tq.encode(x)
         ratio = compressed.compression_ratio
 
-        print(
-            f"  {n:>10,} | {cos:>11.6f} | {mse:>11.6f} | {ipc:>9.6f} | {ratio:>8.1f}x"
-        )
+        print(f"  {n:>10,} | {cos:>11.6f} | {mse:>11.6f} | {ipc:>9.6f} | {ratio:>8.1f}x")
 
     print()
     print("  Key: quality metrics are STABLE across all sequence lengths.")
@@ -433,7 +468,7 @@ def bench_quality_vs_seqlen(device: str):
 # MAIN
 # ===========================================================================
 def main():
-    sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False)
+    sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -446,7 +481,7 @@ def main():
         mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         print(f"\n  GPU: {gpu} ({mem:.1f} GB)")
     else:
-        print(f"\n  Device: CPU")
+        print("\n  Device: CPU")
 
     print(f"  Triton: {'AVAILABLE' if is_triton_available() else 'NOT AVAILABLE'}")
 

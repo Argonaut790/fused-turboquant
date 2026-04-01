@@ -76,7 +76,7 @@ if HAS_TRITON:
         centroid_vals = tl.load(levels_ptr + unpacked, mask=idx < D).to(tl.float32)
 
         # --- Denormalize ---
-        norm = tl.load(norms_ptr + pid)
+        norm = tl.load(norms_ptr + pid).to(tl.float32)
         denormalized = centroid_vals * norm
 
         # --- Inverse FWHT (butterfly stages using output as scratch) ---
@@ -137,9 +137,18 @@ if HAS_TRITON:
 
         grid = (n,)
         _fused_decode_kernel[grid](
-            packed_flat, norms_flat, levels, signs, out,
-            packed_flat.stride(0), out.stride(0),
-            n, d, log2_d, bits, n_levels,
+            packed_flat,
+            norms_flat,
+            levels,
+            signs,
+            out,
+            packed_flat.stride(0),
+            out.stride(0),
+            n,
+            d,
+            log2_d,
+            bits,
+            n_levels,
         )
 
         original_shape = list(norms.shape) + [d]

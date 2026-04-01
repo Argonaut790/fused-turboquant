@@ -16,21 +16,20 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import sys
 import time
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent / "dejan_baseline"))
 
 import torch
-import numpy as np
 
-from fused_turboquant.core.hadamard import RHTRotation, DenseQRRotation
+from fused_turboquant.core.hadamard import DenseQRRotation, RHTRotation
 from fused_turboquant.core.lloyd_max import LloydMaxQuantizer
-from fused_turboquant.core.quantizer import TurboQuantMSE, CompressedTensor
-from fused_turboquant.core.packing import pack_nibbles, unpack_nibbles, pack_2bit, unpack_2bit
+from fused_turboquant.core.packing import pack_2bit, pack_nibbles, unpack_2bit, unpack_nibbles
+from fused_turboquant.core.quantizer import CompressedTensor, TurboQuantMSE
 from fused_turboquant.kernels.triton_rht import is_triton_available
 
 QWEN35_FULL_ATTN_LAYERS = 8
@@ -62,8 +61,10 @@ class DenseQRTurboQuantMSE:
         else:
             packed = indices
         return CompressedTensor(
-            indices=packed, norms=norms.squeeze(-1).float(),
-            original_dim=self.head_dim, bits=self.bits,
+            indices=packed,
+            norms=norms.squeeze(-1).float(),
+            original_dim=self.head_dim,
+            bits=self.bits,
         )
 
     def decode(self, compressed: CompressedTensor) -> torch.Tensor:
@@ -103,11 +104,11 @@ def fmt_bytes(b: float) -> str:
     if b < 1024:
         return f"{b:.0f} B"
     elif b < 1024**2:
-        return f"{b/1024:.1f} KB"
+        return f"{b / 1024:.1f} KB"
     elif b < 1024**3:
-        return f"{b/1024**2:.1f} MB"
+        return f"{b / 1024**2:.1f} MB"
     else:
-        return f"{b/1024**3:.2f} GB"
+        return f"{b / 1024**3:.2f} GB"
 
 
 # ---- BENCHMARK 1: Quality Fairness ----
@@ -134,7 +135,10 @@ def bench_quality_fairness(device: str):
     print(f"  {'----':>4}-+-{'----':<24}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>9}")
 
     for bits in [4, 3, 2]:
-        for name, cls in [("RHT Triton (ours)", TurboQuantMSE), ("Dense QR matmul (others)", DenseQRTurboQuantMSE)]:
+        for name, cls in [
+            ("RHT Triton (ours)", TurboQuantMSE),
+            ("Dense QR matmul (others)", DenseQRTurboQuantMSE),
+        ]:
             tq = cls(head_dim=dim, bits=bits, device=device)
             compressed = tq.encode(x)
             x_hat = tq.decode(compressed)
@@ -143,8 +147,8 @@ def bench_quality_fairness(device: str):
             x_n = x / (torch.norm(x, dim=-1, keepdim=True) + 1e-8)
             xh_n = x_hat / (torch.norm(x_hat, dim=-1, keepdim=True) + 1e-8)
             cos = torch.mean(torch.sum(x_n * xh_n, dim=-1)).item()
-            ip_a = torch.sum(x[:n // 2] * x[n // 2:], dim=-1)
-            ip_b = torch.sum(x_hat[:n // 2] * x_hat[n // 2:], dim=-1)
+            ip_a = torch.sum(x[: n // 2] * x[n // 2 :], dim=-1)
+            ip_b = torch.sum(x_hat[: n // 2] * x_hat[n // 2 :], dim=-1)
             ip_corr = torch.corrcoef(torch.stack([ip_a, ip_b]))[0, 1].item()
             ratio = compressed.compression_ratio
 
@@ -152,7 +156,9 @@ def bench_quality_fairness(device: str):
                 f"  {bits:>4} | {name:<24} | {cos:>11.6f} | {mse:>11.6f} | "
                 f"{ip_corr:>9.6f} | {ratio:>8.1f}x"
             )
-        print(f"  {'----':>4}-+-{'----':<24}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>9}")
+        print(
+            f"  {'----':>4}-+-{'----':<24}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>9}"
+        )
 
 
 # ---- BENCHMARK 2: Attention Accuracy ----
@@ -172,7 +178,9 @@ def bench_attention_accuracy(device: str):
 
     print(f"\n  {num_queries} queries x {seq_len} keys, dim={dim}")
     print()
-    print(f"  {'Bits':>4} | {'Score Cosine':>13} | {'Score MAE':>11} | {'Max Err':>9} | {'Softmax KL':>11}")
+    print(
+        f"  {'Bits':>4} | {'Score Cosine':>13} | {'Score MAE':>11} | {'Max Err':>9} | {'Softmax KL':>11}"
+    )
     print(f"  {'----':>4}-+-{'----':>13}-+-{'----':>11}-+-{'----':>9}-+-{'----':>11}")
 
     for bits in [4, 3, 2]:
@@ -181,7 +189,9 @@ def bench_attention_accuracy(device: str):
         scores_q = (queries @ keys_hat.T) * scale
         flat_fp = scores_fp32.flatten()
         flat_q = scores_q.flatten()
-        cos = torch.nn.functional.cosine_similarity(flat_fp.unsqueeze(0), flat_q.unsqueeze(0)).item()
+        cos = torch.nn.functional.cosine_similarity(
+            flat_fp.unsqueeze(0), flat_q.unsqueeze(0)
+        ).item()
         mae = torch.mean(torch.abs(flat_fp - flat_q)).item()
         max_err = torch.max(torch.abs(flat_fp - flat_q)).item()
         probs_fp = torch.softmax(scores_fp32, dim=-1)
@@ -211,11 +221,17 @@ def bench_rotation_gpu(device: str):
     dense = DenseQRRotation(dim, device=device)
 
     triton_enabled = rht._use_triton
-    print(f"\n  head_dim={dim}, RHT backend={'Triton fused' if triton_enabled else 'PyTorch batched'}")
+    print(
+        f"\n  head_dim={dim}, RHT backend={'Triton fused' if triton_enabled else 'PyTorch batched'}"
+    )
     print()
 
-    print(f"  {'Batch':>8} | {'RHT (ms)':>10} | {'Dense QR (ms)':>14} | {'Speedup':>8} | {'Winner':>12}")
-    print(f"  {'--------':>8}-+-{'----------':>10}-+-{'--------------':>14}-+-{'--------':>8}-+-{'------------':>12}")
+    print(
+        f"  {'Batch':>8} | {'RHT (ms)':>10} | {'Dense QR (ms)':>14} | {'Speedup':>8} | {'Winner':>12}"
+    )
+    print(
+        f"  {'--------':>8}-+-{'----------':>10}-+-{'--------------':>14}-+-{'--------':>8}-+-{'------------':>12}"
+    )
 
     for batch in [64, 256, 1024, 4096, 16384]:
         x = torch.randn(batch, dim, device=device, dtype=torch.float32)
@@ -239,10 +255,14 @@ def bench_memory():
 
     fp16_per_token_all = num_kv_heads * head_dim * 2 * 2 * num_attn_layers
 
-    print(f"\n  {'Context':>10} | {'FP16 KV':>10} | {'TQ4 KV':>10} | {'TQ3 KV':>10} | "
-          f"{'TQ2 KV':>10} | {'FP16->TQ4':>10}")
-    print(f"  {'----------':>10}-+-{'----------':>10}-+-{'----------':>10}-+-{'----------':>10}-+-"
-          f"{'----------':>10}-+-{'----------':>10}")
+    print(
+        f"\n  {'Context':>10} | {'FP16 KV':>10} | {'TQ4 KV':>10} | {'TQ3 KV':>10} | "
+        f"{'TQ2 KV':>10} | {'FP16->TQ4':>10}"
+    )
+    print(
+        f"  {'----------':>10}-+-{'----------':>10}-+-{'----------':>10}-+-{'----------':>10}-+-"
+        f"{'----------':>10}-+-{'----------':>10}"
+    )
 
     for ctx in [1024, 4096, 16384, 32768, 65536, 131072, 262144]:
         fp16_bytes = fp16_per_token_all * ctx
@@ -260,12 +280,16 @@ def bench_memory():
 
     available = 9.5 * 1024**3
     max_ctx_fp16 = int(available / fp16_per_token_all)
-    tq4_per_token = (QWEN35_NUM_KV_HEADS * QWEN35_HEAD_DIM * 2 * 0.5 + QWEN35_NUM_KV_HEADS * 2 * 4) * QWEN35_FULL_ATTN_LAYERS
+    tq4_per_token = (
+        QWEN35_NUM_KV_HEADS * QWEN35_HEAD_DIM * 2 * 0.5 + QWEN35_NUM_KV_HEADS * 2 * 4
+    ) * QWEN35_FULL_ATTN_LAYERS
     max_ctx_tq4 = int(available / tq4_per_token)
 
-    print(f"\n  RTX 5070 Ti: AWQ 4-bit model ~5GB, overhead ~1.5GB, KV budget ~9.5GB")
+    print("\n  RTX 5070 Ti: AWQ 4-bit model ~5GB, overhead ~1.5GB, KV budget ~9.5GB")
     print(f"  Max context FP16:    {max_ctx_fp16:>10,} tokens")
-    print(f"  Max context TQ4-bit: {max_ctx_tq4:>10,} tokens  ({max_ctx_tq4/max_ctx_fp16:.1f}x extension)")
+    print(
+        f"  Max context TQ4-bit: {max_ctx_tq4:>10,} tokens  ({max_ctx_tq4 / max_ctx_fp16:.1f}x extension)"
+    )
 
 
 # ---- BENCHMARK 5: Rotation Storage ----
@@ -283,9 +307,15 @@ def bench_rotation_storage():
     print()
     print(f"  {'Scope':>30} | {'RHT':>14} | {'Dense QR':>14} | {'Ratio':>8}")
     print(f"  {'------------------------------':>30}-+-{'----':>14}-+-{'----':>14}-+-{'----':>8}")
-    print(f"  {'Per rotation':>30} | {fmt_bytes(dim*4):>14} | {fmt_bytes(dim*dim*4):>14} | {dim:>7}x")
-    print(f"  {'Per layer (K+V)':>30} | {fmt_bytes(dim*4*2):>14} | {fmt_bytes(dim*dim*4*2):>14} | {dim:>7}x")
-    print(f"  {'All '+str(num_layers)+' layers':>30} | {fmt_bytes(rht_total):>14} | {fmt_bytes(dense_total):>14} | {dim:>7}x")
+    print(
+        f"  {'Per rotation':>30} | {fmt_bytes(dim * 4):>14} | {fmt_bytes(dim * dim * 4):>14} | {dim:>7}x"
+    )
+    print(
+        f"  {'Per layer (K+V)':>30} | {fmt_bytes(dim * 4 * 2):>14} | {fmt_bytes(dim * dim * 4 * 2):>14} | {dim:>7}x"
+    )
+    print(
+        f"  {'All ' + str(num_layers) + ' layers':>30} | {fmt_bytes(rht_total):>14} | {fmt_bytes(dense_total):>14} | {dim:>7}x"
+    )
 
 
 # ---- BENCHMARK 6: Throughput ----
@@ -299,20 +329,25 @@ def bench_throughput(device: str):
 
     print(f"\n  batch=1, kv_heads={QWEN35_NUM_KV_HEADS}, head_dim={dim}")
     print()
-    print(f"  {'Method':<28} | {'Seq Len':>8} | {'Encode (ms)':>12} | {'Decode (ms)':>12} | {'tok/s enc':>10}")
-    print(f"  {'----------------------------':<28}-+-{'--------':>8}-+-{'------------':>12}-+-{'------------':>12}-+-{'----------':>10}")
+    print(
+        f"  {'Method':<28} | {'Seq Len':>8} | {'Encode (ms)':>12} | {'Decode (ms)':>12} | {'tok/s enc':>10}"
+    )
+    print(
+        f"  {'----------------------------':<28}-+-{'--------':>8}-+-{'------------':>12}-+-{'------------':>12}-+-{'----------':>10}"
+    )
 
     for seq_len in [128, 512, 2048]:
         x = torch.randn(1, QWEN35_NUM_KV_HEADS, seq_len, dim, device=device, dtype=torch.float32)
-        for name, cls in [("TQ4-RHT-Triton (ours)", TurboQuantMSE), ("TQ4-DenseQR-matmul (others)", DenseQRTurboQuantMSE)]:
+        for name, cls in [
+            ("TQ4-RHT-Triton (ours)", TurboQuantMSE),
+            ("TQ4-DenseQR-matmul (others)", DenseQRTurboQuantMSE),
+        ]:
             tq = cls(head_dim=dim, bits=4, device=device)
             t_enc = _timer(lambda: tq.encode(x), use_cuda=use_cuda)
             compressed = tq.encode(x)
             t_dec = _timer(lambda: tq.decode(compressed), use_cuda=use_cuda)
             tps = seq_len / (t_enc / 1000)
-            print(
-                f"  {name:<28} | {seq_len:>8} | {t_enc:>12.3f} | {t_dec:>12.3f} | {tps:>10,.0f}"
-            )
+            print(f"  {name:<28} | {seq_len:>8} | {t_enc:>12.3f} | {t_dec:>12.3f} | {tps:>10,.0f}")
 
 
 # ---- BENCHMARK 7: Dejan.ai Direct Comparison ----
@@ -337,8 +372,12 @@ def bench_dejan_comparison(device: str):
     print(f"\n  {n} random vectors, dim={dim}, seed=42")
     print()
 
-    print(f"  {'Bits':>4} | {'Impl':<28} | {'Cosine Sim':>11} | {'MSE':>11} | {'IP Corr':>9} | {'Rotation':>12}")
-    print(f"  {'----':>4}-+-{'----------------------------':<28}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>12}")
+    print(
+        f"  {'Bits':>4} | {'Impl':<28} | {'Cosine Sim':>11} | {'MSE':>11} | {'IP Corr':>9} | {'Rotation':>12}"
+    )
+    print(
+        f"  {'----':>4}-+-{'----------------------------':<28}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>12}"
+    )
 
     for bits in [4, 3, 2]:
         # Ours (RHT Triton)
@@ -350,8 +389,8 @@ def bench_dejan_comparison(device: str):
         xn = x / (torch.norm(x, dim=-1, keepdim=True) + 1e-8)
         xhn = x_ours / (torch.norm(x_ours, dim=-1, keepdim=True) + 1e-8)
         cos_ours = torch.mean(torch.sum(xn * xhn, dim=-1)).item()
-        ip_a = torch.sum(x[:n // 2] * x[n // 2:], dim=-1)
-        ip_b = torch.sum(x_ours[:n // 2] * x_ours[n // 2:], dim=-1)
+        ip_a = torch.sum(x[: n // 2] * x[n // 2 :], dim=-1)
+        ip_b = torch.sum(x_ours[: n // 2] * x_ours[n // 2 :], dim=-1)
         ipc_ours = torch.corrcoef(torch.stack([ip_a, ip_b]))[0, 1].item()
 
         print(
@@ -367,32 +406,50 @@ def bench_dejan_comparison(device: str):
         mse_dejan = torch.mean((x - x_dejan) ** 2).item()
         xhn_d = x_dejan / (torch.norm(x_dejan, dim=-1, keepdim=True) + 1e-8)
         cos_dejan = torch.mean(torch.sum(xn * xhn_d, dim=-1)).item()
-        ip_c = torch.sum(x_dejan[:n // 2] * x_dejan[n // 2:], dim=-1)
+        ip_c = torch.sum(x_dejan[: n // 2] * x_dejan[n // 2 :], dim=-1)
         ipc_dejan = torch.corrcoef(torch.stack([ip_a, ip_c]))[0, 1].item()
 
         print(
             f"  {bits:>4} | {'Dejan.ai (their code)':<28} | {cos_dejan:>11.6f} | {mse_dejan:>11.6f} | "
             f"{ipc_dejan:>9.6f} | {'Dense QR':>12}"
         )
-        print(f"  {'----':>4}-+-{'----------------------------':<28}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>12}")
+        print(
+            f"  {'----':>4}-+-{'----------------------------':<28}-+-{'----':>11}-+-{'----':>11}-+-{'----':>9}-+-{'----':>12}"
+        )
 
     # Architecture comparison table
     print("\n  ARCHITECTURAL DIFFERENCES:")
     print(f"  {'Feature':<35} | {'fused-turboquant (ours)':<30} | {'Dejan.ai':<30}")
-    print(f"  {'-----------------------------------':<35}-+-{'------------------------------':<30}-+-{'------------------------------':<30}")
-    print(f"  {'Rotation method':<35} | {'RHT (O(d log d), Triton fused)':<30} | {'Dense QR (O(d^2), matmul)':<30}")
-    print(f"  {'Rotation storage per layer':<35} | {fmt_bytes(dim * 4)+' (signs only)':<30} | {fmt_bytes(dim*dim*4)+' (d x d matrix)':<30}")
-    print(f"  {'Triton kernel purpose':<35} | {'Fused RHT butterfly':<30} | {'Fused Q.K^T from uint8 keys':<30}")
-    print(f"  {'Value compression':<35} | {'Yes (K + V both compressed)':<30} | {'No (K only compressed)':<30}")
-    print(f"  {'Nibble packing (4-bit)':<35} | {'Yes (2 indices per byte)':<30} | {'No (1 uint8 per index)':<30}")
-    print(f"  {'Sub-byte packing (2-bit)':<35} | {'Yes (4 indices per byte)':<30} | {'No (1 uint8 per index)':<30}")
+    print(
+        f"  {'-----------------------------------':<35}-+-{'------------------------------':<30}-+-{'------------------------------':<30}"
+    )
+    print(
+        f"  {'Rotation method':<35} | {'RHT (O(d log d), Triton fused)':<30} | {'Dense QR (O(d^2), matmul)':<30}"
+    )
+    print(
+        f"  {'Rotation storage per layer':<35} | {fmt_bytes(dim * 4) + ' (signs only)':<30} | {fmt_bytes(dim * dim * 4) + ' (d x d matrix)':<30}"
+    )
+    print(
+        f"  {'Triton kernel purpose':<35} | {'Fused RHT butterfly':<30} | {'Fused Q.K^T from uint8 keys':<30}"
+    )
+    print(
+        f"  {'Value compression':<35} | {'Yes (K + V both compressed)':<30} | {'No (K only compressed)':<30}"
+    )
+    print(
+        f"  {'Nibble packing (4-bit)':<35} | {'Yes (2 indices per byte)':<30} | {'No (1 uint8 per index)':<30}"
+    )
+    print(
+        f"  {'Sub-byte packing (2-bit)':<35} | {'Yes (4 indices per byte)':<30} | {'No (1 uint8 per index)':<30}"
+    )
     print(f"  {'vLLM plugin':<35} | {'Yes (registered entry point)':<30} | {'No':<30}")
-    print(f"  {'Target model':<35} | {'Qwen3.5-9B (hybrid 8/32)':<30} | {'Gemma 3 4B IT (27 layers)':<30}")
+    print(
+        f"  {'Target model':<35} | {'Qwen3.5-9B (hybrid 8/32)':<30} | {'Gemma 3 4B IT (27 layers)':<30}"
+    )
 
 
 # ---- MAIN ----
 def main():
-    sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False)
+    sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -405,10 +462,10 @@ def main():
         mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         print(f"\n  GPU: {gpu} ({mem:.1f} GB)")
     else:
-        print(f"\n  Device: CPU (GPU not available)")
+        print("\n  Device: CPU (GPU not available)")
 
     print(f"  Triton: {'AVAILABLE' if is_triton_available() else 'NOT AVAILABLE'}")
-    print(f"  Target: Qwen3.5-9B (8 attention + 24 DeltaNet layers)")
+    print("  Target: Qwen3.5-9B (8 attention + 24 DeltaNet layers)")
     print(f"  head_dim={QWEN35_HEAD_DIM}, kv_heads={QWEN35_NUM_KV_HEADS}")
 
     bench_quality_fairness(device)

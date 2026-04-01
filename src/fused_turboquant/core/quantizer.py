@@ -38,14 +38,14 @@ class CompressedTensor:
     """Compressed representation of a tensor after TurboQuant encoding."""
 
     indices: torch.Tensor  # packed uint8 quantization indices
-    norms: torch.Tensor  # fp32 vector norms (1 per vector)
+    norms: torch.Tensor  # fp16 vector norms (1 per vector)
     original_dim: int  # head_dim before packing
     bits: int  # quantization bit-width
 
     @property
     def compression_ratio(self) -> float:
         original_bytes = self.norms.numel() * self.original_dim * 2  # fp16
-        compressed_bytes = self.indices.numel() + self.norms.numel() * 4
+        compressed_bytes = self.indices.numel() + self.norms.numel() * 2  # fp16 norms
         if compressed_bytes == 0:
             return float("inf")
         return original_bytes / compressed_bytes
@@ -71,6 +71,8 @@ class TurboQuantMSE:
         bits: int = 4,
         seed: int = 42,
         device: torch.device | str = "cpu",
+        max_iterations: int = 300,
+        num_grid_points: int = 50000,
     ):
         if head_dim < 1 or (head_dim & (head_dim - 1)) != 0:
             raise ValueError(f"head_dim must be a power of 2, got {head_dim}")
@@ -82,13 +84,20 @@ class TurboQuantMSE:
         self.device = device
 
         self.rotation = RHTRotation(head_dim, seed=seed, device=device)
-        self.quantizer = LloydMaxQuantizer(head_dim, bits=bits, device=device)
+        self.quantizer = LloydMaxQuantizer(
+            head_dim,
+            bits=bits,
+            device=device,
+            max_iterations=max_iterations,
+            num_grid_points=num_grid_points,
+        )
 
         self._use_fused_triton = False
         self._try_enable_fused_triton()
 
     def _try_enable_fused_triton(self) -> None:
         from fused_turboquant.kernels.triton_rht import is_triton_available
+
         if is_triton_available() and str(self.device).startswith("cuda"):
             self._use_fused_triton = True
 
@@ -111,8 +120,10 @@ class TurboQuantMSE:
 
     def _encode_fused(self, x: torch.Tensor) -> CompressedTensor:
         from fused_turboquant.kernels.triton_encode import triton_fused_encode
+
         packed, norms = triton_fused_encode(
-            x, self.rotation.signs,
+            x,
+            self.rotation.signs,
             self.quantizer.boundaries,
             self.bits,
         )
@@ -143,7 +154,7 @@ class TurboQuantMSE:
 
         return CompressedTensor(
             indices=packed,
-            norms=norms.squeeze(-1).float(),
+            norms=norms.squeeze(-1).half(),
             original_dim=self.head_dim,
             bits=self.bits,
         )
@@ -167,10 +178,14 @@ class TurboQuantMSE:
 
     def _decode_fused(self, compressed: CompressedTensor) -> torch.Tensor:
         from fused_turboquant.kernels.triton_decode import triton_fused_decode
+
         return triton_fused_decode(
-            compressed.indices, compressed.norms,
-            self.quantizer.levels, self.rotation.signs,
-            compressed.bits, compressed.original_dim,
+            compressed.indices,
+            compressed.norms,
+            self.quantizer.levels,
+            self.rotation.signs,
+            compressed.bits,
+            compressed.original_dim,
         )
 
     def _decode_unfused(self, compressed: CompressedTensor) -> torch.Tensor:
@@ -184,7 +199,7 @@ class TurboQuantMSE:
             indices = compressed.indices
 
         reconstructed = self.quantizer.dequantize(indices)
-        reconstructed = reconstructed * compressed.norms.unsqueeze(-1)
+        reconstructed = reconstructed * compressed.norms.float().unsqueeze(-1)
         decoded = self.rotation.inverse(reconstructed)
 
         return decoded

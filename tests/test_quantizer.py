@@ -21,7 +21,7 @@ class TestLloydMax:
         n = len(levels)
         for i in range(n // 2):
             assert abs(levels[i] + levels[n - 1 - i]) < 1e-3, (
-                f"Level {i}={levels[i]:.6f} != -Level {n-1-i}={levels[n-1-i]:.6f}"
+                f"Level {i}={levels[i]:.6f} != -Level {n - 1 - i}={levels[n - 1 - i]:.6f}"
             )
 
     def test_quantize_dequantize(self, device):

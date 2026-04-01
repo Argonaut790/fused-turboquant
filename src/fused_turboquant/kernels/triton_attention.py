@@ -21,12 +21,12 @@ ours uses the Triton fused RHT kernel for query rotation (O(d log d)).
 
 from __future__ import annotations
 
-import math
 import torch
 
 try:
     import triton
     import triton.language as tl
+
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
@@ -45,20 +45,25 @@ if HAS_TRITON:
     )
     @triton.jit
     def _fused_qk_scores_kernel(
-        Q_ptr,          # pre-rotated query: [BH_q, head_dim]
-        K_idx_ptr,      # packed key indices: [BH_kv, seq_len, packed_dim] uint8
-        K_norms_ptr,    # key norms: [BH_kv, seq_len] float32
-        C_ptr,          # centroid table: [n_levels] float32
-        Out_ptr,        # output scores: [BH_q, seq_len] float32
+        Q_ptr,  # pre-rotated query: [BH_q, head_dim]
+        K_idx_ptr,  # packed key indices: [BH_kv, seq_len, packed_dim] uint8
+        K_norms_ptr,  # key norms: [BH_kv, seq_len] float32
+        C_ptr,  # centroid table: [n_levels] float32
+        Out_ptr,  # output scores: [BH_q, seq_len] float32
         seq_len,
         head_dim: tl.constexpr,
         n_q_heads,
         n_kv_heads,
         scale,
-        stride_q_bh, stride_q_d,
-        stride_ki_bh, stride_ki_s, stride_ki_d,
-        stride_kn_bh, stride_kn_s,
-        stride_o_bh, stride_o_s,
+        stride_q_bh,
+        stride_q_d,
+        stride_ki_bh,
+        stride_ki_s,
+        stride_ki_d,
+        stride_kn_bh,
+        stride_kn_s,
+        stride_o_bh,
+        stride_o_s,
         BITS: tl.constexpr,
         BLOCK_S: tl.constexpr,
         BLOCK_D: tl.constexpr,
@@ -86,10 +91,12 @@ if HAS_TRITON:
 
             if BITS == 4:
                 pack_d = d_offs // 2
-                ki_ptrs = (K_idx_ptr
-                           + kv_bh * stride_ki_bh
-                           + s_offs[:, None] * stride_ki_s
-                           + pack_d[None, :] * stride_ki_d)
+                ki_ptrs = (
+                    K_idx_ptr
+                    + kv_bh * stride_ki_bh
+                    + s_offs[:, None] * stride_ki_s
+                    + pack_d[None, :] * stride_ki_d
+                )
                 combined_mask = s_mask[:, None] & d_mask[None, :]
                 packed_val = tl.load(ki_ptrs, mask=combined_mask, other=0).to(tl.int32)
                 is_low = (d_offs % 2) == 0
@@ -101,12 +108,10 @@ if HAS_TRITON:
                 packed_total = head_dim * 3 // 8
                 combined_mask = s_mask[:, None] & d_mask[None, :]
                 ki_base = K_idx_ptr + kv_bh * stride_ki_bh
-                b0_ptrs = (ki_base
-                           + s_offs[:, None] * stride_ki_s
-                           + byte_idx[None, :] * stride_ki_d)
-                b1_ptrs = (ki_base
-                           + s_offs[:, None] * stride_ki_s
-                           + (byte_idx + 1)[None, :] * stride_ki_d)
+                b0_ptrs = ki_base + s_offs[:, None] * stride_ki_s + byte_idx[None, :] * stride_ki_d
+                b1_ptrs = (
+                    ki_base + s_offs[:, None] * stride_ki_s + (byte_idx + 1)[None, :] * stride_ki_d
+                )
                 b0 = tl.load(b0_ptrs, mask=combined_mask, other=0).to(tl.int32)
                 b1_valid = (byte_idx + 1) < packed_total
                 b1 = tl.load(
@@ -117,19 +122,23 @@ if HAS_TRITON:
                 k_idx = ((b0 | (b1 << 8)) >> bit_shift[None, :]) & 0x7
             elif BITS == 2:
                 pack_d = d_offs // 4
-                ki_ptrs = (K_idx_ptr
-                           + kv_bh * stride_ki_bh
-                           + s_offs[:, None] * stride_ki_s
-                           + pack_d[None, :] * stride_ki_d)
+                ki_ptrs = (
+                    K_idx_ptr
+                    + kv_bh * stride_ki_bh
+                    + s_offs[:, None] * stride_ki_s
+                    + pack_d[None, :] * stride_ki_d
+                )
                 combined_mask = s_mask[:, None] & d_mask[None, :]
                 packed_val = tl.load(ki_ptrs, mask=combined_mask, other=0).to(tl.int32)
                 shift = (d_offs % 4) * 2
                 k_idx = (packed_val >> shift[None, :]) & 0x3
             else:
-                ki_ptrs = (K_idx_ptr
-                           + kv_bh * stride_ki_bh
-                           + s_offs[:, None] * stride_ki_s
-                           + d_offs[None, :] * stride_ki_d)
+                ki_ptrs = (
+                    K_idx_ptr
+                    + kv_bh * stride_ki_bh
+                    + s_offs[:, None] * stride_ki_s
+                    + d_offs[None, :] * stride_ki_d
+                )
                 combined_mask = s_mask[:, None] & d_mask[None, :]
                 k_idx = tl.load(ki_ptrs, mask=combined_mask, other=0).to(tl.int32)
 
@@ -138,7 +147,7 @@ if HAS_TRITON:
             acc += tl.sum(k_vals * q_vals[None, :], axis=1)
 
         kn_ptrs = K_norms_ptr + kv_bh * stride_kn_bh + s_offs * stride_kn_s
-        norms = tl.load(kn_ptrs, mask=s_mask, other=0.0).to(tl.float32)
+        norms = tl.load(kn_ptrs, mask=s_mask, other=0).to(tl.float32)
 
         scores = norms * acc * scale
 
@@ -147,10 +156,10 @@ if HAS_TRITON:
 
 
 def fused_qk_scores_rht(
-    q_rotated: torch.Tensor,     # [batch, n_q_heads, q_len, head_dim] pre-rotated via RHT
-    key_indices: torch.Tensor,   # [batch, n_kv_heads, kv_len, packed_dim] uint8 (packed)
-    key_norms: torch.Tensor,     # [batch, n_kv_heads, kv_len] float32
-    centroids: torch.Tensor,     # [n_levels] float32
+    q_rotated: torch.Tensor,  # [batch, n_q_heads, q_len, head_dim] pre-rotated via RHT
+    key_indices: torch.Tensor,  # [batch, n_kv_heads, kv_len, packed_dim] uint8 (packed)
+    key_norms: torch.Tensor,  # [batch, n_kv_heads, kv_len] float32
+    centroids: torch.Tensor,  # [n_levels] float32
     scale: float,
     bits: int = 3,
 ) -> torch.Tensor:
@@ -181,8 +190,9 @@ def fused_qk_scores_rht(
     kn_flat = key_norms.reshape(batch * n_kv_heads, kv_len).contiguous()
     centroids = centroids.contiguous().float()
 
-    out = torch.empty(batch * n_q_heads * q_len, kv_len,
-                      device=q_rotated.device, dtype=torch.float32)
+    out = torch.empty(
+        batch * n_q_heads * q_len, kv_len, device=q_rotated.device, dtype=torch.float32
+    )
 
     effective_q_heads = n_q_heads * q_len
 
@@ -190,14 +200,25 @@ def fused_qk_scores_rht(
         return (batch * effective_q_heads, triton.cdiv(kv_len, meta["BLOCK_S"]))
 
     _fused_qk_scores_kernel[grid](
-        q_flat, ki_flat, kn_flat, centroids, out,
-        kv_len, head_dim,
-        effective_q_heads, n_kv_heads,
+        q_flat,
+        ki_flat,
+        kn_flat,
+        centroids,
+        out,
+        kv_len,
+        head_dim,
+        effective_q_heads,
+        n_kv_heads,
         scale,
-        q_flat.stride(0), q_flat.stride(1),
-        ki_flat.stride(0), ki_flat.stride(1), ki_flat.stride(2),
-        kn_flat.stride(0), kn_flat.stride(1),
-        out.stride(0), out.stride(1),
+        q_flat.stride(0),
+        q_flat.stride(1),
+        ki_flat.stride(0),
+        ki_flat.stride(1),
+        ki_flat.stride(2),
+        kn_flat.stride(0),
+        kn_flat.stride(1),
+        out.stride(0),
+        out.stride(1),
         BITS=bits,
     )
 

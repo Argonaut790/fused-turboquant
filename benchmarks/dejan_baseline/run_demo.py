@@ -15,9 +15,9 @@ Usage:
 
 import argparse
 import time
+
 import torch
 from turboquant_core import self_test as core_self_test
-
 
 DEFAULT_PROMPTS = [
     "Explain the difference between a compiler and an interpreter in three sentences.",
@@ -38,8 +38,14 @@ def load_model(model_id: str):
     return model, processor
 
 
-def generate(model, processor, prompt: str, bits: int | None = None,
-             max_new_tokens: int = 200, fused: bool = False) -> dict:
+def generate(
+    model,
+    processor,
+    prompt: str,
+    bits: int | None = None,
+    max_new_tokens: int = 200,
+    fused: bool = False,
+) -> dict:
     """Generate text. If bits is set, uses TurboQuant KV compression.
     If fused=True, uses Triton kernel (requires bits to be set)."""
     messages = [
@@ -47,8 +53,7 @@ def generate(model, processor, prompt: str, bits: int | None = None,
         {"role": "user", "content": [{"type": "text", "text": prompt}]},
     ]
     inputs = processor.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=True,
-        return_dict=True, return_tensors="pt"
+        messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
     ).to(model.device, dtype=torch.bfloat16)
     input_len = inputs["input_ids"].shape[-1]
 
@@ -66,18 +71,28 @@ def generate(model, processor, prompt: str, bits: int | None = None,
         )
         if fused and bits is not None:
             from turboquant_fused import FusedTurboQuantRunner
+
             runner = FusedTurboQuantRunner(model, processor, bits=bits)
             text = runner.generate(prompt, max_new_tokens=max_new_tokens)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - t0
-            peak_mb = (torch.cuda.max_memory_allocated() - vram_before) / 1e6 if torch.cuda.is_available() else 0
+            peak_mb = (
+                (torch.cuda.max_memory_allocated() - vram_before) / 1e6
+                if torch.cuda.is_available()
+                else 0
+            )
             n_tokens = len(processor.tokenizer.encode(text))
-            return {"text": text, "time_s": elapsed,
-                    "tokens": n_tokens, "tok_per_s": n_tokens / elapsed,
-                    "peak_mb": peak_mb}
+            return {
+                "text": text,
+                "time_s": elapsed,
+                "tokens": n_tokens,
+                "tok_per_s": n_tokens / elapsed,
+                "peak_mb": peak_mb,
+            }
         elif bits is not None:
             from turboquant_kv_cache import TurboQuantWrapper
+
             wrapper = TurboQuantWrapper(model, bits=bits)
             outputs = wrapper.generate(**gen_kwargs)
         else:
@@ -86,7 +101,9 @@ def generate(model, processor, prompt: str, bits: int | None = None,
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
-    peak_mb = (torch.cuda.max_memory_allocated() - vram_before) / 1e6 if torch.cuda.is_available() else 0
+    peak_mb = (
+        (torch.cuda.max_memory_allocated() - vram_before) / 1e6 if torch.cuda.is_available() else 0
+    )
 
     gen_ids = outputs[0][input_len:]
     text = processor.decode(gen_ids, skip_special_tokens=True)
@@ -99,7 +116,9 @@ def generate(model, processor, prompt: str, bits: int | None = None,
     }
 
 
-def needle_test(model, processor, bits: int | None, haystack_tokens: int = 2048, fused: bool = False) -> dict:
+def needle_test(
+    model, processor, bits: int | None, haystack_tokens: int = 2048, fused: bool = False
+) -> dict:
     needle = "The secret password for project Orion is 'blue-giraffe-42'."
     question = "What is the secret password for project Orion?"
     filler = (
@@ -109,10 +128,7 @@ def needle_test(model, processor, bits: int | None, haystack_tokens: int = 2048,
     )
     # Rough estimate of filler tokens
     n_repeats = max(1, haystack_tokens // 80)
-    prompt = (
-        f"{filler * n_repeats}\n{needle}\n{filler * n_repeats}\n\n"
-        f"Question: {question}"
-    )
+    prompt = f"{filler * n_repeats}\n{needle}\n{filler * n_repeats}\n\nQuestion: {question}"
     result = generate(model, processor, prompt, bits=bits, max_new_tokens=50, fused=fused)
     found = "blue-giraffe-42" in result["text"].lower()
     return {"found": found, "answer": result["text"].strip(), "time_s": result["time_s"]}
@@ -127,20 +143,24 @@ def main():
     parser.add_argument("--haystack-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--skip-baseline", action="store_true")
-    parser.add_argument("--fused", action="store_true",
-                        help="Use Triton fused attention kernel (requires triton)")
+    parser.add_argument(
+        "--fused", action="store_true", help="Use Triton fused attention kernel (requires triton)"
+    )
     parser.add_argument("--core-test-only", action="store_true")
-    parser.add_argument("--kernel-test", action="store_true",
-                        help="Run Triton kernel correctness test and benchmark")
+    parser.add_argument(
+        "--kernel-test",
+        action="store_true",
+        help="Run Triton kernel correctness test and benchmark",
+    )
     args = parser.parse_args()
 
     # --- Kernel test ---
     if args.kernel_test:
-        from triton_attention import test_fused_kernel, benchmark_fused_vs_standard
+        from triton_attention import benchmark_fused_vs_standard, test_fused_kernel
+
         print("=" * 60)
         print("Triton fused attention kernel tests")
         print("=" * 60)
-        from turboquant_core import TurboQuantMSE  # noqa: ensure codebook is built
         ok = test_fused_kernel()
         if ok:
             print("Benchmarking fused vs standard attention scores:")
@@ -175,15 +195,24 @@ def main():
 
         for label, bits, fused in configs:
             try:
-                result = generate(model, processor, prompt, bits=bits,
-                                  max_new_tokens=args.max_new_tokens, fused=fused)
+                result = generate(
+                    model,
+                    processor,
+                    prompt,
+                    bits=bits,
+                    max_new_tokens=args.max_new_tokens,
+                    fused=fused,
+                )
                 print(f"\n--- {label} ---")
-                print(f"  Tokens: {result['tokens']}  Time: {result['time_s']:.2f}s  "
-                      f"({result['tok_per_s']:.1f} tok/s)  "
-                      f"VRAM delta: {result['peak_mb']:.0f} MB")
+                print(
+                    f"  Tokens: {result['tokens']}  Time: {result['time_s']:.2f}s  "
+                    f"({result['tok_per_s']:.1f} tok/s)  "
+                    f"VRAM delta: {result['peak_mb']:.0f} MB"
+                )
                 print(f"  Output: {result['text'][:500]}")
-            except Exception as e:
+            except Exception:
                 import traceback
+
                 print(f"\n--- {label} --- ERROR:")
                 traceback.print_exc()
         print()
@@ -195,13 +224,15 @@ def main():
         print("=" * 70)
         for label, bits, fused in configs:
             try:
-                r = needle_test(model, processor, bits=bits,
-                                haystack_tokens=args.haystack_tokens, fused=fused)
+                r = needle_test(
+                    model, processor, bits=bits, haystack_tokens=args.haystack_tokens, fused=fused
+                )
                 status = "FOUND" if r["found"] else "MISSED"
                 print(f"  {label:25s}  [{status}]  {r['time_s']:.1f}s")
                 print(f"    Answer: {r['answer'][:150]}")
-            except Exception as e:
+            except Exception:
                 import traceback
+
                 print(f"  {label:25s}  ERROR:")
                 traceback.print_exc()
         print()
